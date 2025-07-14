@@ -992,7 +992,8 @@ async def get_api_info():
             "/status/{task_id}": "Get scraping task status",
             # "/config": "Get scraper configuration",
             "/download/{task_id}/json": "Download results as JSON file",
-            "/download/{task_id}/csv": "Download results as CSV file"
+            "/download/{task_id}/csv": "Download results as CSV file",
+            "/health": "Health check endpoint"
         },
         "example_query": "car companies in Takoradi",
         "logging": {
@@ -1007,8 +1008,63 @@ async def get_api_info():
     return api_info
 
 
-@router.post("/search", summary="Scrape Businesses (Async)")
-async def scrape_businesses_async(background_tasks: BackgroundTasks, request: ScrapeRequest):
+@router.get("/health", summary="Health Check")
+async def health_check():
+    """Health check endpoint for Google Maps API"""
+    logger.info("🌐 API ENDPOINT: /health (Health Check)")
+    logger.info("📥 Health check request received")
+    
+    try:
+        # Get current task statistics
+        total_tasks = len(tasks)
+        pending_tasks = len([task for task in tasks.values() if task.status == "pending"])
+        running_tasks = len([task for task in tasks.values() if task.status == "running"])
+        completed_tasks = len([task for task in tasks.values() if task.status == "completed"])
+        failed_tasks = len([task for task in tasks.values() if task.status == "failed"])
+        
+        health_status = {
+            "status": "healthy",
+            "service": "Google Maps Business Scraper API",
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "uptime": "Service is running"
+        }
+        
+        logger.info("✅ Health check completed successfully")
+        logger.info(f"📊 Task statistics: {health_status['task_statistics']}")
+        
+        return health_status
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error("💥 HEALTH CHECK ERROR")
+        logger.error("=" * 80)
+        logger.error(f"❌ Error Type: {type(e).__name__}")
+        logger.error(f"❌ Error Message: {str(e)}")
+        logger.error("📍 Full Traceback:")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 80)
+        
+        # Return unhealthy status with error details
+        return {
+            "status": "unhealthy",
+            "service": "Google Maps Business Scraper API",
+            "version": "1.0.0",
+            "timestamp": datetime.now().isoformat(),
+            "error": {
+                "type": type(e).__name__,
+                "message": str(e)
+            },
+            "message": "Service is experiencing issues"
+        }
+
+
+@router.get("/search", summary="Scrape Businesses (Async)")
+async def scrape_businesses_async(
+    background_tasks: BackgroundTasks, 
+    query: str = Query(..., description="Search query (e.g., 'hair salons in Takoradi')"),
+    max_results: int = Query(default=100, description="Maximum number of results to scrape", ge=1, le=10000)
+):
     """
     Asynchronously scrape businesses from Google Maps
     
@@ -1018,11 +1074,14 @@ async def scrape_businesses_async(background_tasks: BackgroundTasks, request: Sc
      - **max_results**: Maximum number of results (1-10000)
 
     """
-    logger.info("🌐 API ENDPOINT: /search-async (asynchronous)")
-    logger.info(f"📥 Incoming async request: query='{request.query}', max_results={request.max_results}")
+    logger.info("🌐 API ENDPOINT: /search (asynchronous GET)")
+    logger.info(f"📥 Incoming async GET request: query='{query}', max_results={max_results}")
     
     try:
         import uuid
+        
+        # Create ScrapeRequest object from query parameters
+        request = ScrapeRequest(query=query, max_results=max_results)
         
         # Generate unique task ID
         task_id = str(uuid.uuid4())
@@ -1070,8 +1129,8 @@ async def scrape_businesses_async(background_tasks: BackgroundTasks, request: Sc
         logger.error("=" * 80)
         logger.error(f"❌ Error Type: {type(e).__name__}")
         logger.error(f"❌ Error Message: {str(e)}")
-        logger.error(f"🎯 Query: '{request.query}'")
-        logger.error(f"🔢 Max Results: {request.max_results}")
+        logger.error(f"🎯 Query: '{query}'")
+        logger.error(f"🔢 Max Results: {max_results}")
         logger.error("📍 Full Traceback:")
         logger.error(traceback.format_exc())
         logger.error("=" * 80)
@@ -1079,7 +1138,7 @@ async def scrape_businesses_async(background_tasks: BackgroundTasks, request: Sc
         # Return user-friendly error
         raise HTTPException(
             status_code=500,
-            detail=f"Unable to start scraping task for '{request.query}'. Please try again or contact support if the issue persists."
+            detail=f"Unable to start scraping task for '{query}'. Please try again or contact support if the issue persists."
         )
 
 @router.get("/status/{task_id}", response_model=ScrapeStatus, summary="Get Task Status")
