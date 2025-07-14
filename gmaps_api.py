@@ -988,7 +988,7 @@ async def get_api_info():
         "version": "1.0.0",
         "endpoints": {
             # "/scrape": "Start business scraping (synchronous)",
-            "/scrape": "Start business scraping (asynchronous)",
+            "/search": "Start business scraping (asynchronous)",
             "/status/{task_id}": "Get scraping task status",
             # "/config": "Get scraper configuration",
             "/download/{task_id}/json": "Download results as JSON file",
@@ -1007,7 +1007,7 @@ async def get_api_info():
     return api_info
 
 
-@router.post("/scrape", summary="Scrape Businesses (Async)")
+@router.post("/search", summary="Scrape Businesses (Async)")
 async def scrape_businesses_async(background_tasks: BackgroundTasks, request: ScrapeRequest):
     """
     Asynchronously scrape businesses from Google Maps
@@ -1018,7 +1018,7 @@ async def scrape_businesses_async(background_tasks: BackgroundTasks, request: Sc
      - **max_results**: Maximum number of results (1-10000)
 
     """
-    logger.info("🌐 API ENDPOINT: /scrape-async (asynchronous)")
+    logger.info("🌐 API ENDPOINT: /search-async (asynchronous)")
     logger.info(f"📥 Incoming async request: query='{request.query}', max_results={request.max_results}")
     
     try:
