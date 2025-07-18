@@ -7,6 +7,7 @@ import json
 import time
 import uuid
 import logging
+import traceback
 from datetime import datetime
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
@@ -326,6 +327,285 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
         task_status[task_id].completed_at = datetime.now()
         raise e
 
+
+def scrape_todays_launches_task(task_id: str):
+    """Background task to scrape today's ProductHunt launches"""
+    
+    logger.info(f"🚀 Starting background task {task_id} for today's launches")
+    
+    try:
+        # Update task status to running
+        task_status[task_id].status = "running"
+        task_status[task_id].created_at = datetime.now()
+        logger.info(f"📊 Task {task_id} status set to running")
+        
+        all_products = []
+        
+        logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
+        driver = setup_chrome_driver()
+        
+        try:
+            # Method 1: GraphQL API call for unfeatured posts
+            logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
+            
+            params = {
+                'operationName': 'UnfeaturedPosts',
+                'variables': '{}',
+                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"96c4888ea89cb7a0ce6b621e09ec3a487a224ae73a77f578ceecbe5f4f2b5ac4"}}',
+            }
+            
+            base_url = 'https://www.producthunt.com/frontend/graphql'
+            url = base_url + '?' + urlencode(params)
+            
+            driver.get(url)
+            
+            # Wait for page to load
+            logger.info(f"⏳ Task {task_id}: Waiting for GraphQL response...")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "pre"))
+            )
+            
+            # Parse response
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            pre_content = soup.find('pre')
+            
+            if pre_content:
+                json_data = json.loads(pre_content.get_text())
+                
+                # Extract products from GraphQL response
+                if 'data' in json_data and 'homefeed' in json_data['data']:
+                    edges = json_data['data']['homefeed'].get('edges', [])
+                    if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
+                        products = edges[0]['node']['items']
+                        logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
+                        
+                        for product in products:
+                            try:
+                                # Extract product data with error handling
+                                name = product.get('name')
+                                slug = product.get('slug')
+                                tagline = product.get('tagline')
+                                
+                                # Extract thumbnail URL
+                                thumbnail_uuid = product.get('thumbnailImageUuid')
+                                thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
+                                
+                                # Extract short URL
+                                short_url = product.get('shortenedUrl')
+                                domain = f'https://producthunt.com{short_url}' if short_url else None
+                                
+                                # Extract rankings
+                                daily_rank = product.get('dailyRank')
+                                weekly_rank = product.get('weeklyRank')
+                                monthly_rank = product.get('monthlyRank')
+                                
+                                # Extract engagement metrics
+                                votes_count = product.get('votesCount')
+                                comments_count = product.get('commentsCount')
+                                latest_score = product.get('latestScore')
+                                launch_day_score = product.get('launchDayScore')
+                                
+                                # Extract timestamps
+                                created_at = product.get('createdAt')
+                                
+                                # Extract categories
+                                categories = None
+                                try:
+                                    topics = product.get('topics', {}).get('edges', [])
+                                    if topics:
+                                        category_names = [cat['name'] for cat in topics if cat.get('name')]
+                                        categories = ', '.join(category_names)
+                                except Exception:
+                                    categories = None
+                                
+                                product_data = Product(
+                                    id=product.get('id', ''),
+                                    name=name or '',
+                                    slug=slug or '',
+                                    tagline=tagline or '',
+                                    thumbnail_image_uuid=thumbnail_image_uuid,
+                                    domain=domain,
+                                    daily_rank=daily_rank,
+                                    weekly_rank=weekly_rank,
+                                    monthly_rank=monthly_rank,
+                                    votes_count=votes_count,
+                                    comments_count=comments_count,
+                                    latest_score=latest_score,
+                                    launch_day_score=launch_day_score,
+                                    featured_at=created_at,
+                                    categories=categories
+                                )
+                                
+                                all_products.append(product_data)
+                                logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from GraphQL")
+                                
+                            except Exception as e:
+                                logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
+                                continue
+            
+            # Method 2: Direct webpage scraping for additional data
+            logger.info(f"🌐 Task {task_id}: Scraping main ProductHunt page for additional data")
+            
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.6',
+                'cache-control': 'max-age=0',
+                'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-user': '?1',
+                'sec-gpc': '1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            }
+            
+            # Use requests for the main page
+            import requests
+            response = requests.get('https://www.producthunt.com/', headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract data from script tags
+            json_content1 = None
+            for script in soup.find_all('script'):
+                content = script.get_text()
+                if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
+                    content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
+                    json_content1 = json.loads(content)
+                    break
+            
+            if json_content1 and 'events' in json_content1 and len(json_content1['events']) > 4:
+                event_data = json_content1['events'][4]['value']['data']['homefeed']
+                
+                # Get pagination info
+                page_info = event_data.get('pageInfo', {})
+                has_next_page = page_info.get('hasNextPage', False)
+                cursor = page_info.get('endCursor')
+                
+                logger.info(f"📄 Task {task_id}: Page info - hasNextPage: {has_next_page}, cursor: {cursor}")
+                
+                # Extract products from webpage data
+                edges = event_data.get('edges', [])
+                if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
+                    products = edges[0]['node']['items']
+                    logger.info(f"📋 Task {task_id}: Found {len(products)} products from webpage")
+                    
+                    for product in products:
+                        try:
+                            # Extract product data with error handling
+                            name = product.get('name')
+                            slug = product.get('slug')
+                            tagline = product.get('tagline')
+                            
+                            # Extract thumbnail URL
+                            thumbnail_uuid = product.get('thumbnailImageUuid')
+                            thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
+                            
+                            # Extract short URL
+                            short_url = product.get('shortenedUrl')
+                            domain = f'https://producthunt.com{short_url}' if short_url else None
+                            
+                            # Extract rankings
+                            daily_rank = product.get('dailyRank')
+                            weekly_rank = product.get('weeklyRank')
+                            monthly_rank = product.get('monthlyRank')
+                            
+                            # Extract engagement metrics
+                            votes_count = product.get('votesCount')
+                            comments_count = product.get('commentsCount')
+                            latest_score = product.get('latestScore')
+                            launch_day_score = product.get('launchDayScore')
+                            
+                            # Extract timestamps
+                            created_at = product.get('createdAt')
+                            
+                            # Extract categories
+                            categories = None
+                            try:
+                                topics = product.get('topics', {}).get('edges', [])
+                                if topics:
+                                    category_names = [cat['name'] for cat in topics if cat.get('name')]
+                                    categories = ', '.join(category_names)
+                            except Exception:
+                                categories = None
+                            
+                            product_data = Product(
+                                id=product.get('id', ''),
+                                name=name or '',
+                                slug=slug or '',
+                                tagline=tagline or '',
+                                thumbnail_image_uuid=thumbnail_image_uuid,
+                                domain=domain,
+                                daily_rank=daily_rank,
+                                weekly_rank=weekly_rank,
+                                monthly_rank=monthly_rank,
+                                votes_count=votes_count,
+                                comments_count=comments_count,
+                                latest_score=latest_score,
+                                launch_day_score=launch_day_score,
+                                featured_at=created_at,
+                                categories=categories
+                            )
+                            
+                            # Check if product already exists (avoid duplicates)
+                            existing_product = next((p for p in all_products if p.id == product_data.id), None)
+                            if not existing_product:
+                                all_products.append(product_data)
+                                logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from webpage")
+                            else:
+                                logger.debug(f"⏭️ Task {task_id}: Skipped duplicate product {product_data.name}")
+                                
+                        except Exception as e:
+                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from webpage: {str(e)}")
+                            continue
+            
+            # Remove duplicates based on ID
+            unique_products = []
+            seen_ids = set()
+            for product in all_products:
+                if product.id and product.id not in seen_ids:
+                    unique_products.append(product)
+                    seen_ids.add(product.id)
+                elif not product.id:
+                    # If no ID, use name as fallback
+                    if product.name and product.name not in seen_ids:
+                        unique_products.append(product)
+                        seen_ids.add(product.name)
+            
+            all_products = unique_products
+            
+        finally:
+            logger.info(f"🧹 Task {task_id}: Closing Chrome WebDriver")
+            driver.quit()
+        
+        # Update task status to completed
+        task_status[task_id].status = "completed"
+        task_status[task_id].progress = 100
+        task_status[task_id].total_pages = 1  # Today's launches is typically one page
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].products_found = len(all_products)
+        
+        logger.info(f"🎉 Task {task_id}: Completed successfully. Total products: {len(all_products)}")
+        
+        # Store results
+        task_results[task_id] = {
+            "products": all_products,
+            "has_next_page": False,  # Today's launches don't have pagination
+            "end_cursor": None
+        }
+        
+        return all_products, False, None
+        
+    except Exception as e:
+        logger.error(f"💥 Task {task_id}: Failed with error: {str(e)}")
+        # Update task status to failed
+        task_status[task_id].status = "failed"
+        task_status[task_id].error_message = str(e)
+        task_status[task_id].completed_at = datetime.now()
+        raise e
+
 @router.get("/products/daily")
 async def get_daily_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
@@ -416,7 +696,7 @@ async def get_monthly_rankings(
     logger.info(f"🆔 Created task {task_id} for monthly rankings on {date}")
     
     # Use higher max_pages for monthly data since it can be larger
-    background_tasks.add_task(scrape_producthunt_data_task, task_id, "monthly", date, 20)
+    background_tasks.add_task(scrape_producthunt_data_task, task_id, "monthly", date, 100)
     
     logger.info(f"✅ Task {task_id} queued successfully for monthly rankings")
     
@@ -459,7 +739,36 @@ async def get_yearly_rankings(
         "status": "pending",
         "date": date,
         "rank_type": "yearly",
-        "status_url": f"/producthunt/tasks/{task_id}"
+        "status_url": f"/producthunt/status/{task_id}"
+    }
+
+@router.get("/todays_launches")
+async def get_todays_launches(background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Get today's ProductHunt launches"""
+    
+    logger.info(f"📥 Received GET request for today's launches")
+    
+    task_id = str(uuid.uuid4())
+    task_status[task_id] = TaskStatus(
+        task_id=task_id,
+        status="pending",
+        created_at=datetime.now()
+    )
+    
+    logger.info(f"🆔 Created task {task_id} for today's launches")
+    
+    # Start background task
+    background_tasks.add_task(scrape_todays_launches_task, task_id)
+    
+    logger.info(f"✅ Task {task_id} queued successfully for today's launches")
+    
+    return {
+        "task_id": task_id, 
+        "message": "Scraping today's launches started", 
+        "status": "pending",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "rank_type": "todays_launches",
+        "status_url": f"/producthunt/status/{task_id}"
     }
 
 @router.get("/status/{task_id}")
@@ -486,16 +795,23 @@ async def get_task_status(task_id: str):
         "error_message": task.error_message,
         "created_at": task.created_at.isoformat() if task.created_at else None,
         "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-        "result_url": f"/producthunt/tasks/{task_id}/result" if task.status == "completed" else None
+        "result_url": f"/producthunt/results/{task_id}" if task.status == "completed" else None
     }
     
     return status_response
 
 @router.get("/results/{task_id}")
-async def get_task_result(task_id: str):
-    """Get the result of a completed scraping task"""
+async def get_task_result(
+    task_id: str,
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 100)")
+):
+    """Get the result of a completed scraping task with pagination"""
+    
+    logger.info(f"📥 Results request for task {task_id} - page {page}, limit {limit}")
     
     if task_id not in task_status:
+        logger.warning(f"❌ Task {task_id} not found for results")
         raise HTTPException(status_code=404, detail="Task not found")
     
     task = task_status[task_id]
@@ -507,19 +823,52 @@ async def get_task_result(task_id: str):
     elif task.status == "failed":
         raise HTTPException(status_code=500, detail=f"Task failed: {task.error_message}")
     
-    # For completed tasks, return the actual results
+    # For completed tasks, return the actual results with pagination
     if task_id in task_results:
         result = task_results[task_id]
+        all_products = result["products"]
+        total_products = len(all_products)
+        
+        # Calculate pagination
+        start_index = (page - 1) * limit
+        end_index = start_index + limit
+        current_page_products = all_products[start_index:end_index]
+        
+        # Calculate pagination metadata
+        total_pages = (total_products + limit - 1) // limit  # Ceiling division
+        has_next_page = page < total_pages
+        has_previous_page = page > 1
+        
+        logger.info(f"📊 Task {task_id} results - Page {page}/{total_pages}, Products {start_index+1}-{min(end_index, total_products)} of {total_products}")
+        
         return {
             "task_id": task_id,
             "status": "completed",
-            "total_products": len(result["products"]),
-            "total_pages": task.total_pages,
-            "has_next_page": result["has_next_page"],
-            "end_cursor": result["end_cursor"],
-            "products": result["products"]
+            "pagination": {
+                "current_page": page,
+                "total_pages": total_pages,
+                "total_products": total_products,
+                "products_per_page": limit,
+                "has_next_page": has_next_page,
+                "has_previous_page": has_previous_page,
+                "start_index": start_index + 1,
+                "end_index": min(end_index, total_products)
+            },
+            "scraping_info": {
+                "total_pages_scraped": task.total_pages,
+                "has_more_data": result["has_next_page"],
+                "end_cursor": result["end_cursor"]
+            },
+            "products": current_page_products,
+            "links": {
+                "first_page": f"/producthunt/results/{task_id}?page=1&limit={limit}",
+                "last_page": f"/producthunt/results/{task_id}?page={total_pages}&limit={limit}",
+                "next_page": f"/producthunt/results/{task_id}?page={page+1}&limit={limit}" if has_next_page else None,
+                "previous_page": f"/producthunt/results/{task_id}?page={page-1}&limit={limit}" if has_previous_page else None
+            }
         }
     else:
+        logger.warning(f"❌ Task {task_id} results not found")
         raise HTTPException(status_code=404, detail="Task results not found")
 
 @router.get("/")
@@ -533,7 +882,28 @@ async def root():
             "GET /products/weekly?year=X&week=Y": "Start weekly rankings scraping",
             "GET /products/monthly?year=X&month=Y": "Start monthly rankings scraping",
             "GET /products/yearly?year=X": "Start yearly rankings scraping",
-            "GET /tasks/{task_id}": "Get task status",
-            "GET /tasks/{task_id}/result": "Get task results"
+            "GET /todays_launches": "Get today's ProductHunt launches",
+            "GET /status/{task_id}": "Get task status",
+            "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
+            "GET /health": "Health check endpoint"
         }
-    } 
+    }
+
+
+@router.get("/health", summary="Health Check")
+async def health_check():
+    """Health check endpoint for ProductHunt API"""
+    logger.info("🌐 API ENDPOINT: /health (Health Check)")
+    logger.info("📥 Health check request received")
+    
+    health_status = {
+        "status": "healthy",
+        "service": "ProductHunt Scraper API",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": "Service is running",
+    }
+    
+    logger.info("✅ Health check completed successfully")
+    
+    return health_status
