@@ -49,7 +49,7 @@ class Product(BaseModel):
     comments_count: Optional[int] = None
     latest_score: Optional[int] = None
     launch_day_score: Optional[int] = None
-    featured_at: Optional[str] = None
+    created_at: Optional[str] = None
     categories: Optional[str] = None
 
 class TaskStatus(BaseModel):
@@ -179,7 +179,7 @@ def extract_product_data(product_node: Dict[str, Any]) -> Product:
     launch_day_score = product_node.get('launchDayScore')
     
     # Extract timestamps
-    featured_at = product_node.get('featuredAt')
+    created_at = product_node.get('createdAt')
     
     # Extract categories
     categories = None
@@ -205,7 +205,7 @@ def extract_product_data(product_node: Dict[str, Any]) -> Product:
         comments_count=comments_count,
         latest_score=latest_score,
         launch_day_score=launch_day_score,
-        featured_at=featured_at,
+        created_at=created_at,
         categories=categories
     )
 
@@ -432,7 +432,7 @@ def scrape_todays_launches_task(task_id: str):
                                     comments_count=comments_count,
                                     latest_score=latest_score,
                                     launch_day_score=launch_day_score,
-                                    featured_at=created_at,
+                                    created_at=created_at,
                                     categories=categories
                                 )
                                 
@@ -545,7 +545,7 @@ def scrape_todays_launches_task(task_id: str):
                                 comments_count=comments_count,
                                 latest_score=latest_score,
                                 launch_day_score=launch_day_score,
-                                featured_at=created_at,
+                                created_at=created_at,
                                 categories=categories
                             )
                             
