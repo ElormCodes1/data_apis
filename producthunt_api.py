@@ -808,8 +808,8 @@ def extract_upcoming_product_data(product_node: Dict[str, Any]) -> Optional[Upco
         thumbnail_image_uuid = f'https://ph-files.imgix.net/{logo_uuid}' if logo_uuid else None
         
         # Extract short URL
-        product_id = product_node.get('product', {}).get('id')
-        domain = f'https://producthunt.com/r/p/{product_id}' if product_id else None
+        # product_id = product_node.get('product', {}).get('id')
+        # domain = f'https://producthunt.com/r/p/{product_id}' if product_id else None
         
         # Extract reviews
         reviews_count = product_node.get('product', {}).get('reviewsCount')
@@ -837,7 +837,7 @@ def extract_upcoming_product_data(product_node: Dict[str, Any]) -> Optional[Upco
             slug=slug,
             tagline=tagline,
             thumbnail_image_uuid=thumbnail_image_uuid,
-            domain=domain,
+            # domain=domain,
             reviews_count=reviews_count,
             reviews_rating=reviews_rating,
             url=url,
