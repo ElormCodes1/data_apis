@@ -1013,50 +1013,19 @@ async def health_check():
     """Health check endpoint for Google Maps API"""
     logger.info("🌐 API ENDPOINT: /health (Health Check)")
     logger.info("📥 Health check request received")
+        
+    health_status = {
+        "status": "healthy",
+        "service": "Google Maps Business Scraper API",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": "Service is running"
+    }
     
-    try:
-        # Get current task statistics
-        total_tasks = len(tasks)
-        pending_tasks = len([task for task in tasks.values() if task.status == "pending"])
-        running_tasks = len([task for task in tasks.values() if task.status == "running"])
-        completed_tasks = len([task for task in tasks.values() if task.status == "completed"])
-        failed_tasks = len([task for task in tasks.values() if task.status == "failed"])
+    logger.info("✅ Health check completed successfully")
+    
+    return health_status
         
-        health_status = {
-            "status": "healthy",
-            "service": "Google Maps Business Scraper API",
-            "version": "1.0.0",
-            "timestamp": datetime.now().isoformat(),
-            "uptime": "Service is running"
-        }
-        
-        logger.info("✅ Health check completed successfully")
-        logger.info(f"📊 Task statistics: {health_status['task_statistics']}")
-        
-        return health_status
-        
-    except Exception as e:
-        logger.error("=" * 80)
-        logger.error("💥 HEALTH CHECK ERROR")
-        logger.error("=" * 80)
-        logger.error(f"❌ Error Type: {type(e).__name__}")
-        logger.error(f"❌ Error Message: {str(e)}")
-        logger.error("📍 Full Traceback:")
-        logger.error(traceback.format_exc())
-        logger.error("=" * 80)
-        
-        # Return unhealthy status with error details
-        return {
-            "status": "unhealthy",
-            "service": "Google Maps Business Scraper API",
-            "version": "1.0.0",
-            "timestamp": datetime.now().isoformat(),
-            "error": {
-                "type": type(e).__name__,
-                "message": str(e)
-            },
-            "message": "Service is experiencing issues"
-        }
 
 
 @router.get("/search", summary="Scrape Businesses (Async)")
