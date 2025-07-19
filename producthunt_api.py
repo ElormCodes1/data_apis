@@ -73,6 +73,23 @@ class ProductHuntCategory(BaseModel):
     url: str
     id: str
 
+
+class CategoryProduct(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    tagline: Optional[str] = None
+    thumbnail_image_uuid: Optional[str] = None
+    domain: Optional[str] = None
+    reviews_count: Optional[int] = None
+    reviews_rating: Optional[float] = None
+    url: Optional[str] = None
+    created_at: Optional[str] = None
+    categories: Optional[str] = None
+    description: Optional[str] = None
+    media_images: Optional[List[str]] = None
+    featured_shoutouts_to_count: Optional[int] = None
+    posts_count: Optional[int] = None
+
 class TaskStatus(BaseModel):
     task_id: str
     status: str  # "pending", "running", "completed", "failed"
@@ -976,6 +993,259 @@ def scrape_categories_task(task_id: str):
         logger.error(f"❌ Task {task_id} failed: {str(e)}")
 
 
+def scrape_category_products_task(task_id: str, category_slug: str):
+    """Background task to scrape ProductHunt category products"""
+    
+    logger.info(f"🚀 Starting background task {task_id} for category products")
+    logger.info(f"📊 Category Slug: {category_slug}")
+    
+    # Always use highest_rated order
+    order = "highest_rated"
+    
+    try:
+        # Update task status to running
+        task_status[task_id].status = "running"
+        task_status[task_id].created_at = datetime.now()
+        logger.info(f"📊 Task {task_id} status set to running")
+        
+        all_products = []
+        current_page = 0
+        has_next_page = True
+        cursor = None
+        
+        logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
+        driver = setup_chrome_driver()
+        
+        try:
+            # Step 1: Get initial data from the category page
+            logger.info("📡 Step 1: Fetching initial data from ProductHunt category page")
+            
+            # Build the category URL using slug
+            category_url = f'https://www.producthunt.com/categories/{category_slug}'
+            
+            logger.info(f"🌐 Fetching category page: {category_url}")
+            
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.5',
+                'cache-control': 'max-age=0',
+                'priority': 'u=0, i',
+                'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'same-origin',
+                'sec-fetch-user': '?1',
+                'sec-gpc': '1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            }
+            
+            response = requests.get(category_url, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract JSON data from Apollo SSR data transport script
+            json_content = None
+            for script in soup.find_all('script'):
+                content = script.get_text()
+                if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
+                    content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
+                    json_content = json.loads(content)
+                    break
+            
+            if not json_content:
+                raise Exception("Could not extract JSON data from ProductHunt category page")
+            
+            # Extract initial data
+            product_category = json_content['events'][1]['value']['data']['productCategory']
+            products_data = product_category['products']
+            has_next_page = products_data['pageInfo']['hasNextPage']
+            cursor = products_data['pageInfo']['endCursor']
+            
+            logger.info(f"📊 Initial data extracted - has_next_page: {has_next_page}, cursor: {cursor}")
+            
+            # Process initial products
+            for product in products_data['edges']:
+                try:
+                    product_data = extract_category_product_data(product['node'])
+                    if product_data:
+                        all_products.append(product_data)
+                        logger.info(f"✅ Extracted product: {product_data.name}")
+                except Exception as e:
+                    logger.error(f"❌ Error extracting product data: {str(e)}")
+                    continue
+            
+            current_page += 1
+            task_status[task_id].current_page = current_page
+            task_status[task_id].products_found = len(all_products)
+            logger.info(f"📄 Page {current_page} completed - {len(all_products)} products found so far")
+            
+            # Step 2: Continue with GraphQL pagination
+            while has_next_page:
+                logger.info(f"📡 Fetching page {current_page + 1} with cursor: {cursor}")
+                
+                params = {
+                    'operationName': 'CategoryPageQuery',
+                    'variables': f'{{"featuredOnly":false,"slug":"{category_slug}","cursor":"{cursor}","order":"{order}"}}',
+                    'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"ee0d68a735f6a7ccc4e4463c827dcca56c67251489e394cf7da3ed2eae5a8d8b"}}',
+                }
+                
+                base_url = 'https://www.producthunt.com/frontend/graphql'
+                url = base_url + '?' + urlencode(params)
+                
+                driver.get(url)
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                pre_content = soup.find('pre')
+                
+                if not pre_content:
+                    logger.error("❌ Could not find pre content in response")
+                    break
+                
+                json_data = json.loads(pre_content.get_text())
+                products_data = json_data['data']['productCategory']['products']
+                has_next_page = products_data['pageInfo']['hasNextPage']
+                cursor = products_data['pageInfo']['endCursor']
+                
+                logger.info(f"📊 Page {current_page + 1} data - has_next_page: {has_next_page}, cursor: {cursor}")
+                
+                # Process products from this page
+                for product in products_data['edges']:
+                    try:
+                        product_data = extract_category_product_data(product['node'])
+                        if product_data:
+                            all_products.append(product_data)
+                            logger.info(f"✅ Extracted product: {product_data.name}")
+                    except Exception as e:
+                        logger.error(f"❌ Error extracting product data: {str(e)}")
+                        continue
+                
+                current_page += 1
+                task_status[task_id].current_page = current_page
+                task_status[task_id].products_found = len(all_products)
+                task_status[task_id].progress = min(95, (current_page * 100) // 50)  # Estimate 50 pages max
+                
+                logger.info(f"📄 Page {current_page} completed - {len(all_products)} products found so far")
+                
+                # Safety check to prevent infinite loops
+                if current_page > 100:
+                    logger.warning("⚠️ Reached maximum page limit (100), stopping pagination")
+                    break
+        
+        finally:
+            driver.quit()
+            logger.info("🔧 Chrome WebDriver closed")
+        
+        # Store results
+        task_results[task_id] = {
+            "products": [product.dict() for product in all_products],
+            "total_products": len(all_products),
+            "has_next_page": has_next_page,
+            "end_cursor": cursor
+        }
+        
+        # Update task status to completed
+        task_status[task_id].status = "completed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].progress = 100
+        task_status[task_id].total_pages = current_page
+        task_status[task_id].products_found = len(all_products)
+        
+        logger.info(f"✅ Task {task_id} completed successfully with {len(all_products)} category products")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error(f"💥 TASK {task_id} ERROR")
+        logger.error("=" * 80)
+        logger.error(f"❌ Error Type: {type(e).__name__}")
+        logger.error(f"❌ Error Message: {str(e)}")
+        logger.error("📍 Full Traceback:")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 80)
+        
+        # Update task status to failed
+        task_status[task_id].status = "failed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].error_message = str(e)
+        
+        logger.error(f"❌ Task {task_id} failed: {str(e)}")
+
+
+def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[CategoryProduct]:
+    """Extract category product data from a product node"""
+    
+    try:
+        # Extract basic info with error handling
+        name = product_node.get('name')
+        slug = product_node.get('slug')
+        tagline = product_node.get('tagline')
+        
+        # Extract thumbnail URL
+        logo_uuid = product_node.get('logoUuid')
+        thumbnail_image_uuid = f'https://ph-files.imgix.net/{logo_uuid}' if logo_uuid else None
+        
+        # Extract short URL
+        product_id = product_node.get('id')
+        domain = f'https://producthunt.com/r/p/{product_id}' if product_id else None
+        
+        # Extract reviews
+        reviews_count = product_node.get('reviewsCount')
+        reviews_rating = product_node.get('reviewsRating')
+        
+        # Extract URL and timestamps
+        path = product_node.get('path')
+        url = f"https://producthunt.com{path}" if path else None
+        created_at = product_node.get('createdAt')
+        
+        # Extract categories
+        categories = None
+        try:
+            topics = product_node.get('topics', {}).get('edges', [])
+            if topics:
+                category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
+                categories = ', '.join(category_names)
+        except Exception:
+            categories = None
+        
+        # Extract description
+        description = product_node.get('description')
+        
+        # Extract media images
+        media_images = None
+        try:
+            media_images_data = product_node.get('mediaImages', [])
+            if media_images_data:
+                media_images = [f'https://ph-files.imgix.net/{img["imageUuid"]}' for img in media_images_data if img.get('imageUuid')]
+        except Exception:
+            media_images = None
+        
+        # Extract additional metrics
+        featured_shoutouts_to_count = product_node.get('featuredShoutoutsToCount')
+        posts_count = product_node.get('postsCount')
+        
+        return CategoryProduct(
+            name=name,
+            slug=slug,
+            tagline=tagline,
+            thumbnail_image_uuid=thumbnail_image_uuid,
+            domain=domain,
+            reviews_count=reviews_count,
+            reviews_rating=reviews_rating,
+            url=url,
+            created_at=created_at,
+            categories=categories,
+            description=description,
+            media_images=media_images,
+            featured_shoutouts_to_count=featured_shoutouts_to_count,
+            posts_count=posts_count
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting category product data: {str(e)}")
+        return None
+
+
 @router.get("/products/daily")
 async def get_daily_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
@@ -1201,6 +1471,41 @@ async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
         "status_url": f"/producthunt/status/{task_id}"
     }
 
+
+@router.get("/category_products")
+async def get_category_products(
+    category_slug: str = Query(..., description="Category slug (e.g., ai-notetakers)"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
+    """Get ProductHunt products from a specific category (sorted by highest rated)"""
+    
+    logger.info(f"📥 Received GET request for category products - Slug: {category_slug}")
+    
+    task_id = str(uuid.uuid4())
+    task_status[task_id] = TaskStatus(
+        task_id=task_id,
+        status="pending",
+        created_at=datetime.now()
+    )
+    
+    logger.info(f"🆔 Created task {task_id} for category products")
+    
+    # Start background task
+    background_tasks.add_task(scrape_category_products_task, task_id, category_slug)
+    
+    logger.info(f"✅ Task {task_id} queued successfully for category products")
+    
+    return {
+        "task_id": task_id, 
+        "message": "Scraping category products started", 
+        "status": "pending",
+        "category_slug": category_slug,
+        "order": "highest_rated",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "rank_type": "category_products",
+        "status_url": f"/producthunt/status/{task_id}"
+    }
+
 @router.get("/status/{task_id}")
 async def get_task_status(task_id: str):
     """Get the status of a scraping task"""
@@ -1334,6 +1639,7 @@ async def root():
             "GET /todays_launches": "Get today's ProductHunt launches",
             "GET /upcoming_launches": "Get ProductHunt upcoming launches",
             "GET /categories": "Get ProductHunt categories",
+            "GET /category_products?category_slug=X": "Get products from specific category (highest rated)",
             "GET /status/{task_id}": "Get task status",
             "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
             "GET /health": "Health check endpoint"
