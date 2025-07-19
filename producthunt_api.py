@@ -59,7 +59,7 @@ class UpcomingLaunchProduct(BaseModel):
     slug: Optional[str] = None
     tagline: Optional[str] = None
     thumbnail_image_uuid: Optional[str] = None
-    domain: Optional[str] = None
+    # domain: Optional[str] = None
     reviews_count: Optional[int] = None
     reviews_rating: Optional[float] = None
     url: Optional[str] = None
