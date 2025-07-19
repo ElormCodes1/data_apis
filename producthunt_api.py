@@ -67,6 +67,12 @@ class UpcomingLaunchProduct(BaseModel):
     categories: Optional[str] = None
     description: Optional[str] = None
 
+
+class ProductHuntCategory(BaseModel):
+    name: str
+    url: str
+    id: str
+
 class TaskStatus(BaseModel):
     task_id: str
     status: str  # "pending", "running", "completed", "failed"
@@ -851,6 +857,125 @@ def extract_upcoming_product_data(product_node: Dict[str, Any]) -> Optional[Upco
         return None
 
 
+def scrape_categories_task(task_id: str):
+    """Background task to scrape ProductHunt categories"""
+    
+    logger.info(f"🚀 Starting background task {task_id} for categories")
+    
+    try:
+        # Update task status to running
+        task_status[task_id].status = "running"
+        task_status[task_id].created_at = datetime.now()
+        logger.info(f"📊 Task {task_id} status set to running")
+        
+        logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
+        driver = setup_chrome_driver()
+        
+        try:
+            # Make GraphQL API call for categories
+            logger.info("📡 Fetching ProductHunt categories via GraphQL API")
+            
+            params = {
+                'operationName': 'HeaderDesktopProductsNavigationQuery',
+                'variables': '{}',
+                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"fd37cb954d265af3f43315fe547c112ca5e1c8e0ef70d1cec6b1601f01c7aa08"}}',
+            }
+            
+            base_url = 'https://www.producthunt.com/frontend/graphql'
+            url = base_url + '?' + urlencode(params)
+            
+            driver.get(url)
+            
+            # Wait for page to load
+            logger.info(f"⏳ Task {task_id}: Waiting for GraphQL response...")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "pre"))
+            )
+            
+            # Parse response
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            pre_content = soup.find('pre')
+            
+            if not pre_content:
+                raise Exception("Could not find pre content in response")
+            
+            json_data = json.loads(pre_content.get_text())
+            logger.info(f"📊 Task {task_id}: Successfully parsed GraphQL response")
+            
+            # Extract categories
+            category_list = []
+            product_categories = json_data.get('data', {}).get('productCategories', {}).get('edges', [])
+            
+            logger.info(f"📋 Task {task_id}: Found {len(product_categories)} main categories")
+            
+            for category in product_categories:
+                try:
+                    sub_categories = category['node']['subCategories']['nodes']
+                    logger.info(f"📂 Processing category: {category['node'].get('name', 'Unknown')} with {len(sub_categories)} subcategories")
+                    
+                    for sub_category in sub_categories:
+                        try:
+                            category_data = ProductHuntCategory(
+                                name=sub_category['name'],
+                                url="https://producthunt.com" + sub_category['path'],
+                                id=sub_category['id']
+                            )
+                            category_list.append(category_data)
+                            logger.info(f"✅ Extracted category: {category_data.name}")
+                        except Exception as e:
+                            logger.error(f"❌ Error extracting subcategory data: {str(e)}")
+                            continue
+                            
+                except Exception as e:
+                    logger.error(f"❌ Error processing category: {str(e)}")
+                    continue
+            
+            logger.info(f"📊 Task {task_id}: Successfully extracted {len(category_list)} categories")
+            
+            # Update task status
+            task_status[task_id].current_page = 1
+            task_status[task_id].products_found = len(category_list)
+            task_status[task_id].progress = 100
+            
+        finally:
+            driver.quit()
+            logger.info("🔧 Chrome WebDriver closed")
+        
+        # Store results
+        task_results[task_id] = {
+            "categories": [category.dict() for category in category_list],
+            "total_categories": len(category_list),
+            "has_next_page": False,  # Categories don't have pagination
+            "end_cursor": None
+        }
+        
+        # Update task status to completed
+        task_status[task_id].status = "completed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].total_pages = 1
+        task_status[task_id].products_found = len(category_list)
+        
+        logger.info(f"✅ Task {task_id} completed successfully with {len(category_list)} categories")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error(f"💥 TASK {task_id} ERROR")
+        logger.error("=" * 80)
+        logger.error(f"❌ Error Type: {type(e).__name__}")
+        logger.error(f"❌ Error Message: {str(e)}")
+        logger.error("📍 Full Traceback:")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 80)
+        
+        # Update task status to failed
+        task_status[task_id].status = "failed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].error_message = str(e)
+        
+        logger.error(f"❌ Task {task_id} failed: {str(e)}")
+
+
 @router.get("/products/daily")
 async def get_daily_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
@@ -1046,6 +1171,36 @@ async def get_upcoming_launches(background_tasks: BackgroundTasks = BackgroundTa
         "status_url": f"/producthunt/status/{task_id}"
     }
 
+
+@router.get("/categories")
+async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Get ProductHunt categories"""
+    
+    logger.info(f"📥 Received GET request for categories")
+    
+    task_id = str(uuid.uuid4())
+    task_status[task_id] = TaskStatus(
+        task_id=task_id,
+        status="pending",
+        created_at=datetime.now()
+    )
+    
+    logger.info(f"🆔 Created task {task_id} for categories")
+    
+    # Start background task
+    background_tasks.add_task(scrape_categories_task, task_id)
+    
+    logger.info(f"✅ Task {task_id} queued successfully for categories")
+    
+    return {
+        "task_id": task_id, 
+        "message": "Scraping categories started", 
+        "status": "pending",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "rank_type": "categories",
+        "status_url": f"/producthunt/status/{task_id}"
+    }
+
 @router.get("/status/{task_id}")
 async def get_task_status(task_id: str):
     """Get the status of a scraping task"""
@@ -1101,40 +1256,57 @@ async def get_task_result(
     # For completed tasks, return the actual results with pagination
     if task_id in task_results:
         result = task_results[task_id]
-        all_products = result["products"]
-        total_products = len(all_products)
+        
+        # Handle both products and categories
+        if "products" in result:
+            # Product results
+            all_items = result["products"]
+            total_items = len(all_items)
+            item_type = "products"
+            total_items_key = "total_products"
+            items_per_page_key = "products_per_page"
+        elif "categories" in result:
+            # Category results
+            all_items = result["categories"]
+            total_items = len(all_items)
+            item_type = "categories"
+            total_items_key = "total_categories"
+            items_per_page_key = "categories_per_page"
+        else:
+            logger.error(f"❌ Task {task_id} results contain neither 'products' nor 'categories' key")
+            raise HTTPException(status_code=500, detail="Invalid result format")
         
         # Calculate pagination
         start_index = (page - 1) * limit
         end_index = start_index + limit
-        current_page_products = all_products[start_index:end_index]
+        current_page_items = all_items[start_index:end_index]
         
         # Calculate pagination metadata
-        total_pages = (total_products + limit - 1) // limit  # Ceiling division
+        total_pages = (total_items + limit - 1) // limit  # Ceiling division
         has_next_page = page < total_pages
         has_previous_page = page > 1
         
-        logger.info(f"📊 Task {task_id} results - Page {page}/{total_pages}, Products {start_index+1}-{min(end_index, total_products)} of {total_products}")
+        logger.info(f"📊 Task {task_id} results - Page {page}/{total_pages}, {item_type.title()} {start_index+1}-{min(end_index, total_items)} of {total_items}")
         
-        return {
+        response_data = {
             "task_id": task_id,
             "status": "completed",
             "pagination": {
                 "current_page": page,
                 "total_pages": total_pages,
-                "total_products": total_products,
-                "products_per_page": limit,
+                total_items_key: total_items,
+                items_per_page_key: limit,
                 "has_next_page": has_next_page,
                 "has_previous_page": has_previous_page,
                 "start_index": start_index + 1,
-                "end_index": min(end_index, total_products)
+                "end_index": min(end_index, total_items)
             },
             "scraping_info": {
                 "total_pages_scraped": task.total_pages,
-                "has_more_data": result["has_next_page"],
-                "end_cursor": result["end_cursor"]
+                "has_more_data": result.get("has_next_page", False),
+                "end_cursor": result.get("end_cursor")
             },
-            "products": current_page_products,
+            item_type: current_page_items,
             "links": {
                 "first_page": f"/producthunt/results/{task_id}?page=1&limit={limit}",
                 "last_page": f"/producthunt/results/{task_id}?page={total_pages}&limit={limit}",
@@ -1142,6 +1314,8 @@ async def get_task_result(
                 "previous_page": f"/producthunt/results/{task_id}?page={page-1}&limit={limit}" if has_previous_page else None
             }
         }
+        
+        return response_data
     else:
         logger.warning(f"❌ Task {task_id} results not found")
         raise HTTPException(status_code=404, detail="Task results not found")
@@ -1159,6 +1333,7 @@ async def root():
             "GET /products/yearly?year=X": "Start yearly rankings scraping",
             "GET /todays_launches": "Get today's ProductHunt launches",
             "GET /upcoming_launches": "Get ProductHunt upcoming launches",
+            "GET /categories": "Get ProductHunt categories",
             "GET /status/{task_id}": "Get task status",
             "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
             "GET /health": "Health check endpoint"
