@@ -8,6 +8,7 @@ import time
 import uuid
 import logging
 import traceback
+import requests
 from datetime import datetime
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
@@ -51,6 +52,20 @@ class Product(BaseModel):
     launch_day_score: Optional[int] = None
     created_at: Optional[str] = None
     categories: Optional[str] = None
+
+
+class UpcomingLaunchProduct(BaseModel):
+    name: Optional[str] = None
+    slug: Optional[str] = None
+    tagline: Optional[str] = None
+    thumbnail_image_uuid: Optional[str] = None
+    domain: Optional[str] = None
+    reviews_count: Optional[int] = None
+    reviews_rating: Optional[float] = None
+    url: Optional[str] = None
+    created_at: Optional[str] = None
+    categories: Optional[str] = None
+    description: Optional[str] = None
 
 class TaskStatus(BaseModel):
     task_id: str
@@ -606,6 +621,236 @@ def scrape_todays_launches_task(task_id: str):
         task_status[task_id].completed_at = datetime.now()
         raise e
 
+
+def scrape_upcoming_launches_task(task_id: str):
+    """Background task to scrape ProductHunt upcoming launches"""
+    
+    logger.info(f"🚀 Starting background task {task_id} for upcoming launches")
+    
+    try:
+        # Update task status to running
+        task_status[task_id].status = "running"
+        task_status[task_id].created_at = datetime.now()
+        logger.info(f"📊 Task {task_id} status set to running")
+        
+        all_products = []
+        current_page = 0
+        has_next_page = True
+        cursor = None
+        
+        logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
+        driver = setup_chrome_driver()
+        
+        try:
+            # Step 1: Get initial data from the coming-soon page
+            logger.info("📡 Step 1: Fetching initial data from ProductHunt coming-soon page")
+            
+            params = {
+                'ref': 'header_nav',
+            }
+            
+            headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                'accept-language': 'en-US,en;q=0.6',
+                'priority': 'u=0, i',
+                'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"macOS"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'none',
+                'sec-fetch-user': '?1',
+                'sec-gpc': '1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            }
+            
+            response = requests.get('https://www.producthunt.com/coming-soon', params=params, headers=headers)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Extract JSON data from Apollo SSR data transport script
+            json_content = None
+            for script in soup.find_all('script'):
+                content = script.get_text()
+                if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
+                    content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
+                    json_content = json.loads(content)
+                    break
+            
+            if not json_content:
+                raise Exception("Could not extract JSON data from ProductHunt page")
+            
+            # Extract initial data
+            upcoming_events = json_content['events'][1]['value']['data']['upcomingEvents']
+            has_next_page = upcoming_events['pageInfo']['hasNextPage']
+            cursor = upcoming_events['pageInfo']['endCursor']
+            
+            logger.info(f"📊 Initial data extracted - has_next_page: {has_next_page}, cursor: {cursor}")
+            
+            # Process initial products
+            for product in upcoming_events['edges']:
+                try:
+                    product_data = extract_upcoming_product_data(product['node'])
+                    if product_data:
+                        all_products.append(product_data)
+                        logger.info(f"✅ Extracted product: {product_data.name}")
+                except Exception as e:
+                    logger.error(f"❌ Error extracting product data: {str(e)}")
+                    continue
+            
+            current_page += 1
+            task_status[task_id].current_page = current_page
+            task_status[task_id].products_found = len(all_products)
+            logger.info(f"📄 Page {current_page} completed - {len(all_products)} products found so far")
+            
+            # Step 2: Continue with GraphQL pagination
+            while has_next_page:
+                logger.info(f"📡 Fetching page {current_page + 1} with cursor: {cursor}")
+                
+                params = {
+                    'operationName': 'ComingSoonPage',
+                    'variables': f'{{"cursor":"{cursor}"}}',
+                    'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"700b4bd479cd2238279f8cfa04af3cff1644ae202de24ff40fc678d731e0b647"}}',
+                }
+                
+                base_url = 'https://www.producthunt.com/frontend/graphql'
+                url = base_url + '?' + urlencode(params)
+                
+                driver.get(url)
+                soup = BeautifulSoup(driver.page_source, 'html.parser')
+                pre_content = soup.find('pre')
+                
+                if not pre_content:
+                    logger.error("❌ Could not find pre content in response")
+                    break
+                
+                json_data = json.loads(pre_content.get_text())
+                upcoming_events = json_data['data']['upcomingEvents']
+                has_next_page = upcoming_events['pageInfo']['hasNextPage']
+                cursor = upcoming_events['pageInfo']['endCursor']
+                
+                logger.info(f"📊 Page {current_page + 1} data - has_next_page: {has_next_page}, cursor: {cursor}")
+                
+                # Process products from this page
+                for product in upcoming_events['edges']:
+                    try:
+                        product_data = extract_upcoming_product_data(product['node'])
+                        if product_data:
+                            all_products.append(product_data)
+                            logger.info(f"✅ Extracted product: {product_data.name}")
+                    except Exception as e:
+                        logger.error(f"❌ Error extracting product data: {str(e)}")
+                        continue
+                
+                current_page += 1
+                task_status[task_id].current_page = current_page
+                task_status[task_id].products_found = len(all_products)
+                task_status[task_id].progress = min(95, (current_page * 100) // 50)  # Estimate 50 pages max
+                
+                logger.info(f"📄 Page {current_page} completed - {len(all_products)} products found so far")
+                
+                # Safety check to prevent infinite loops
+                if current_page > 100:
+                    logger.warning("⚠️ Reached maximum page limit (100), stopping pagination")
+                    break
+        
+        finally:
+            driver.quit()
+            logger.info("🔧 Chrome WebDriver closed")
+        
+        # Store results
+        task_results[task_id] = {
+            "products": [product.dict() for product in all_products],
+            "total_products": len(all_products),
+            "has_next_page": has_next_page,
+            "end_cursor": cursor
+        }
+        
+        # Update task status to completed
+        task_status[task_id].status = "completed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].progress = 100
+        task_status[task_id].total_pages = current_page
+        task_status[task_id].products_found = len(all_products)
+        
+        logger.info(f"✅ Task {task_id} completed successfully with {len(all_products)} upcoming products")
+        logger.info("=" * 80)
+        
+    except Exception as e:
+        logger.error("=" * 80)
+        logger.error(f"💥 TASK {task_id} ERROR")
+        logger.error("=" * 80)
+        logger.error(f"❌ Error Type: {type(e).__name__}")
+        logger.error(f"❌ Error Message: {str(e)}")
+        logger.error("📍 Full Traceback:")
+        logger.error(traceback.format_exc())
+        logger.error("=" * 80)
+        
+        # Update task status to failed
+        task_status[task_id].status = "failed"
+        task_status[task_id].completed_at = datetime.now()
+        task_status[task_id].error_message = str(e)
+        
+        logger.error(f"❌ Task {task_id} failed: {str(e)}")
+
+
+def extract_upcoming_product_data(product_node: Dict[str, Any]) -> Optional[UpcomingLaunchProduct]:
+    """Extract upcoming product data from a product node"""
+    
+    try:
+        # Extract basic info with error handling
+        name = product_node.get('product', {}).get('name')
+        slug = product_node.get('product', {}).get('slug')
+        tagline = product_node.get('product', {}).get('tagline')
+        
+        # Extract thumbnail URL
+        logo_uuid = product_node.get('product', {}).get('logoUuid')
+        thumbnail_image_uuid = f'https://ph-files.imgix.net/{logo_uuid}' if logo_uuid else None
+        
+        # Extract short URL
+        product_id = product_node.get('product', {}).get('id')
+        domain = f'https://producthunt.com/r/p/{product_id}' if product_id else None
+        
+        # Extract reviews
+        reviews_count = product_node.get('product', {}).get('reviewsCount')
+        reviews_rating = product_node.get('product', {}).get('reviewsRating')
+        
+        # Extract URL and timestamps
+        url = product_node.get('url')
+        created_at = product_node.get('post', {}).get('createdAt')
+        
+        # Extract categories
+        categories = None
+        try:
+            topics = product_node.get('product', {}).get('topics', {}).get('edges', [])
+            if topics:
+                category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
+                categories = ', '.join(category_names)
+        except Exception:
+            categories = None
+        
+        # Extract description
+        description = product_node.get('truncatedDescription')
+        
+        return UpcomingLaunchProduct(
+            name=name,
+            slug=slug,
+            tagline=tagline,
+            thumbnail_image_uuid=thumbnail_image_uuid,
+            domain=domain,
+            reviews_count=reviews_count,
+            reviews_rating=reviews_rating,
+            url=url,
+            created_at=created_at,
+            categories=categories,
+            description=description
+        )
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting upcoming product data: {str(e)}")
+        return None
+
+
 @router.get("/products/daily")
 async def get_daily_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
@@ -771,6 +1016,36 @@ async def get_todays_launches(background_tasks: BackgroundTasks = BackgroundTask
         "status_url": f"/producthunt/status/{task_id}"
     }
 
+
+@router.get("/upcoming_launches")
+async def get_upcoming_launches(background_tasks: BackgroundTasks = BackgroundTasks()):
+    """Get ProductHunt upcoming launches"""
+    
+    logger.info(f"📥 Received GET request for upcoming launches")
+    
+    task_id = str(uuid.uuid4())
+    task_status[task_id] = TaskStatus(
+        task_id=task_id,
+        status="pending",
+        created_at=datetime.now()
+    )
+    
+    logger.info(f"🆔 Created task {task_id} for upcoming launches")
+    
+    # Start background task
+    background_tasks.add_task(scrape_upcoming_launches_task, task_id)
+    
+    logger.info(f"✅ Task {task_id} queued successfully for upcoming launches")
+    
+    return {
+        "task_id": task_id, 
+        "message": "Scraping upcoming launches started", 
+        "status": "pending",
+        "date": datetime.now().strftime("%Y-%m-%d"),
+        "rank_type": "upcoming_launches",
+        "status_url": f"/producthunt/status/{task_id}"
+    }
+
 @router.get("/status/{task_id}")
 async def get_task_status(task_id: str):
     """Get the status of a scraping task"""
@@ -883,6 +1158,7 @@ async def root():
             "GET /products/monthly?year=X&month=Y": "Start monthly rankings scraping",
             "GET /products/yearly?year=X": "Start yearly rankings scraping",
             "GET /todays_launches": "Get today's ProductHunt launches",
+            "GET /upcoming_launches": "Get ProductHunt upcoming launches",
             "GET /status/{task_id}": "Get task status",
             "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
             "GET /health": "Health check endpoint"
