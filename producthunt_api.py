@@ -18,6 +18,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# Import cache
+try:
+    from redis_cache import cache
+    CACHE_AVAILABLE = True
+except ImportError:
+    CACHE_AVAILABLE = False
+    cache = None
+
 # Configure logging
 logging.basicConfig(
     level=logging.INFO,
@@ -355,6 +363,22 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
             "end_cursor": cursor
         }
         
+        # Cache the results
+        if CACHE_AVAILABLE and cache:
+            # Convert Product objects to dictionaries for proper JSON serialization
+            products_dict = [product.dict() for product in all_products]
+            cache_data = {
+                "products": products_dict,
+                "has_next_page": has_next_page,
+                "end_cursor": cursor,
+                "total_products": len(all_products),
+                "date": date,
+                "rank_type": rank_type,
+                "scraped_at": datetime.now().isoformat()
+            }
+            cache.set(f"{rank_type}_rankings", cache_data, date=date)
+            logger.info(f"💾 Task {task_id}: Cached {rank_type} rankings for {date}")
+        
         return all_products, has_next_page, cursor
         
     except Exception as e:
@@ -628,11 +652,18 @@ def scrape_todays_launches_task(task_id: str):
         logger.info(f"🎉 Task {task_id}: Completed successfully. Total products: {len(all_products)}")
         
         # Store results
-        task_results[task_id] = {
+        result_data = {
             "products": all_products,
             "has_next_page": False,  # Today's launches don't have pagination
             "end_cursor": None
         }
+        
+        task_results[task_id] = result_data
+        
+        # Cache the results
+        if CACHE_AVAILABLE and cache:
+            cache.set("todays_launches", result_data)
+            logger.info(f"💾 Cached today's launches data for task {task_id}")
         
         return all_products, False, None
         
@@ -782,12 +813,19 @@ def scrape_upcoming_launches_task(task_id: str):
             logger.info("🔧 Chrome WebDriver closed")
         
         # Store results
-        task_results[task_id] = {
+        result_data = {
             "products": [product.dict() for product in all_products],
             "total_products": len(all_products),
             "has_next_page": has_next_page,
             "end_cursor": cursor
         }
+        
+        task_results[task_id] = result_data
+        
+        # Cache the results
+        if CACHE_AVAILABLE and cache:
+            cache.set("upcoming_launches", result_data)
+            logger.info(f"💾 Cached upcoming launches data for task {task_id}")
         
         # Update task status to completed
         task_status[task_id].status = "completed"
@@ -959,12 +997,19 @@ def scrape_categories_task(task_id: str):
             logger.info("🔧 Chrome WebDriver closed")
         
         # Store results
-        task_results[task_id] = {
+        result_data = {
             "categories": [category.dict() for category in category_list],
             "total_categories": len(category_list),
             "has_next_page": False,  # Categories don't have pagination
             "end_cursor": None
         }
+        
+        task_results[task_id] = result_data
+        
+        # Cache the results
+        if CACHE_AVAILABLE and cache:
+            cache.set("categories", result_data)
+            logger.info(f"💾 Cached categories data for task {task_id}")
         
         # Update task status to completed
         task_status[task_id].status = "completed"
@@ -1137,12 +1182,19 @@ def scrape_category_products_task(task_id: str, category_slug: str):
             logger.info("🔧 Chrome WebDriver closed")
         
         # Store results
-        task_results[task_id] = {
+        result_data = {
             "products": [product.dict() for product in all_products],
             "total_products": len(all_products),
             "has_next_page": has_next_page,
             "end_cursor": cursor
         }
+        
+        task_results[task_id] = result_data
+        
+        # Cache the results
+        if CACHE_AVAILABLE and cache:
+            cache.set("category_products", result_data, category_slug=category_slug)
+            logger.info(f"💾 Cached category products data for task {task_id} - {category_slug}")
         
         # Update task status to completed
         task_status[task_id].status = "completed"
@@ -1258,6 +1310,22 @@ async def get_daily_rankings(
     date = f"{year}/{month:02d}/{day:02d}"
     logger.info(f"📥 Received GET request for daily rankings: {date}")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("daily_rankings", date=date)
+        if cached_data:
+            logger.info("✅ Returning cached data for daily rankings")
+            return {
+                "products": cached_data.get("products", []),
+                "total_products": cached_data.get("total_products", 0),
+                "has_next_page": cached_data.get("has_next_page", False),
+                "end_cursor": cached_data.get("end_cursor"),
+                "date": date,
+                "rank_type": "daily",
+                "scraped_at": cached_data.get("scraped_at")
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1278,7 +1346,7 @@ async def get_daily_rankings(
         "status": "pending",
         "date": date,
         "rank_type": "daily",
-        "status_url": f"/producthunt/tasks/{task_id}"
+        "status_url": f"/producthunt/status/{task_id}"
     }
 
 @router.get("/products/weekly")
@@ -1292,6 +1360,22 @@ async def get_weekly_rankings(
     date = f"{year}/{week}"
     logger.info(f"📥 Received GET request for weekly rankings: {date}")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("weekly_rankings", date=date)
+        if cached_data:
+            logger.info("✅ Returning cached data for weekly rankings")
+            return {
+                "products": cached_data.get("products", []),
+                "total_products": cached_data.get("total_products", 0),
+                "has_next_page": cached_data.get("has_next_page", False),
+                "end_cursor": cached_data.get("end_cursor"),
+                "date": date,
+                "rank_type": "weekly",
+                "scraped_at": cached_data.get("scraped_at")
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1312,7 +1396,7 @@ async def get_weekly_rankings(
         "status": "pending",
         "date": date,
         "rank_type": "weekly",
-        "status_url": f"/producthunt/tasks/{task_id}"
+        "status_url": f"/producthunt/status/{task_id}"
     }
 
 @router.get("/products/monthly")
@@ -1326,6 +1410,22 @@ async def get_monthly_rankings(
     date = f"{year}/{month}"
     logger.info(f"📥 Received GET request for monthly rankings: {date}")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("monthly_rankings", date=date)
+        if cached_data:
+            logger.info("✅ Returning cached data for monthly rankings")
+            return {
+                "products": cached_data.get("products", []),
+                "total_products": cached_data.get("total_products", 0),
+                "has_next_page": cached_data.get("has_next_page", False),
+                "end_cursor": cached_data.get("end_cursor"),
+                "date": date,
+                "rank_type": "monthly",
+                "scraped_at": cached_data.get("scraped_at")
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1346,7 +1446,7 @@ async def get_monthly_rankings(
         "status": "pending",
         "date": date,
         "rank_type": "monthly",
-        "status_url": f"/producthunt/tasks/{task_id}"
+        "status_url": f"/producthunt/status/{task_id}"
     }
 
 @router.get("/products/yearly")
@@ -1359,6 +1459,22 @@ async def get_yearly_rankings(
     date = str(year)
     logger.info(f"📥 Received GET request for yearly rankings: {date}")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("yearly_rankings", date=date)
+        if cached_data:
+            logger.info("✅ Returning cached data for yearly rankings")
+            return {
+                "products": cached_data.get("products", []),
+                "total_products": cached_data.get("total_products", 0),
+                "has_next_page": cached_data.get("has_next_page", False),
+                "end_cursor": cached_data.get("end_cursor"),
+                "date": date,
+                "rank_type": "yearly",
+                "scraped_at": cached_data.get("scraped_at")
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1388,6 +1504,21 @@ async def get_todays_launches(background_tasks: BackgroundTasks = BackgroundTask
     
     logger.info(f"📥 Received GET request for today's launches")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("todays_launches")
+        if cached_data:
+            logger.info("✅ Returning cached data for today's launches")
+            return {
+                "message": "Cached data retrieved successfully",
+                "status": "completed",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "rank_type": "todays_launches",
+                "cached": True,
+                "data": cached_data
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1418,6 +1549,21 @@ async def get_upcoming_launches(background_tasks: BackgroundTasks = BackgroundTa
     
     logger.info(f"📥 Received GET request for upcoming launches")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("upcoming_launches")
+        if cached_data:
+            logger.info("✅ Returning cached data for upcoming launches")
+            return {
+                "message": "Cached data retrieved successfully",
+                "status": "completed",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "rank_type": "upcoming_launches",
+                "cached": True,
+                "data": cached_data
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1448,6 +1594,21 @@ async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
     
     logger.info(f"📥 Received GET request for categories")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("categories")
+        if cached_data:
+            logger.info("✅ Returning cached data for categories")
+            return {
+                "message": "Cached data retrieved successfully",
+                "status": "completed",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "rank_type": "categories",
+                "cached": True,
+                "data": cached_data
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1481,6 +1642,23 @@ async def get_category_products(
     
     logger.info(f"📥 Received GET request for category products - Slug: {category_slug}")
     
+    # Check cache first
+    if CACHE_AVAILABLE and cache:
+        cached_data = cache.get("category_products", category_slug=category_slug)
+        if cached_data:
+            logger.info(f"✅ Returning cached data for category products - {category_slug}")
+            return {
+                "message": "Cached data retrieved successfully",
+                "status": "completed",
+                "category_slug": category_slug,
+                "order": "highest_rated",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "rank_type": "category_products",
+                "cached": True,
+                "data": cached_data
+            }
+    
+    # If no cache, start scraping
     task_id = str(uuid.uuid4())
     task_status[task_id] = TaskStatus(
         task_id=task_id,
@@ -1631,18 +1809,21 @@ async def root():
     return {
         "message": "ProductHunt Scraper API",
         "version": "1.0.0",
+        "cache_available": CACHE_AVAILABLE and cache is not None,
         "endpoints": {
             "GET /products/daily?year=X&month=Y&day=Z": "Start daily rankings scraping",
             "GET /products/weekly?year=X&week=Y": "Start weekly rankings scraping",
             "GET /products/monthly?year=X&month=Y": "Start monthly rankings scraping",
             "GET /products/yearly?year=X": "Start yearly rankings scraping",
-            "GET /todays_launches": "Get today's ProductHunt launches",
-            "GET /upcoming_launches": "Get ProductHunt upcoming launches",
-            "GET /categories": "Get ProductHunt categories",
-            "GET /category_products?category_slug=X": "Get products from specific category (highest rated)",
+            "GET /todays_launches": "Get today's ProductHunt launches (cached)",
+            "GET /upcoming_launches": "Get ProductHunt upcoming launches (cached)",
+            "GET /categories": "Get ProductHunt categories (cached)",
+            "GET /category_products?category_slug=X": "Get products from specific category (cached)",
             "GET /status/{task_id}": "Get task status",
             "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
-            "GET /health": "Health check endpoint"
+            "GET /health": "Health check endpoint",
+            "GET /cache/stats": "Get cache statistics",
+            "DELETE /cache/clear": "Clear all cache"
         }
     }
 
@@ -1653,14 +1834,50 @@ async def health_check():
     logger.info("🌐 API ENDPOINT: /health (Health Check)")
     logger.info("📥 Health check request received")
     
+    cache_status = "available" if CACHE_AVAILABLE and cache and cache.redis_client else "unavailable"
+    
     health_status = {
         "status": "healthy",
         "service": "ProductHunt Scraper API",
         "version": "1.0.0",
         "timestamp": datetime.now().isoformat(),
         "uptime": "Service is running",
+        "cache": cache_status
     }
     
     logger.info("✅ Health check completed successfully")
     
     return health_status
+
+@router.get("/cache/stats")
+async def get_cache_stats():
+    """Get cache statistics"""
+    logger.info("🌐 API ENDPOINT: /cache/stats")
+    
+    if not CACHE_AVAILABLE or not cache:
+        raise HTTPException(status_code=503, detail="Cache not available")
+    
+    stats = cache.get_cache_stats()
+    logger.info("✅ Cache stats retrieved successfully")
+    
+    return {
+        "cache_stats": stats,
+        "timestamp": datetime.now().isoformat()
+    }
+
+@router.delete("/cache/clear")
+async def clear_cache():
+    """Clear all cache"""
+    logger.info("🌐 API ENDPOINT: /cache/clear")
+    
+    if not CACHE_AVAILABLE or not cache:
+        raise HTTPException(status_code=503, detail="Cache not available")
+    
+    success = cache.clear_all()
+    logger.info(f"✅ Cache clear {'completed' if success else 'failed'}")
+    
+    return {
+        "message": "Cache cleared successfully" if success else "Failed to clear cache",
+        "success": success,
+        "timestamp": datetime.now().isoformat()
+    }
