@@ -14,7 +14,7 @@ class ProductHuntCache:
     
     def __init__(self):
         # Redis connection configuration
-        self.redis_host = os.getenv('REDIS_HOST_P') or os.getenv('REDIS_HOST_I')
+        self.redis_host = os.getenv('REDIS_HOST_I') or os.getenv('REDIS_HOST_P')
         self.redis_port = int(os.getenv('REDIS_PORT', 6379))
         self.redis_password = os.getenv('REDIS_PASSWORD', None)
         self.redis_db = int(os.getenv('REDIS_DB', 1))
