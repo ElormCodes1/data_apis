@@ -383,106 +383,8 @@ def scrape_todays_launches_task(task_id: str):
         driver = setup_chrome_driver()
         
         try:
-            # Method 1: GraphQL API call for unfeatured posts
-            logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
-            
-            params = {
-                'operationName': 'UnfeaturedPosts',
-                'variables': '{}',
-                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"96c4888ea89cb7a0ce6b621e09ec3a487a224ae73a77f578ceecbe5f4f2b5ac4"}}',
-            }
-            
-            base_url = 'https://www.producthunt.com/frontend/graphql'
-            url = base_url + '?' + urlencode(params)
-            
-            driver.get(url)
-            
-            # Wait for page to load
-            logger.info(f"⏳ Task {task_id}: Waiting for GraphQL response...")
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "pre"))
-            )
-            
-            # Parse response
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            pre_content = soup.find('pre')
-            
-            if pre_content:
-                json_data = json.loads(pre_content.get_text())
-                
-                # Extract products from GraphQL response
-                if 'data' in json_data and 'homefeed' in json_data['data']:
-                    edges = json_data['data']['homefeed'].get('edges', [])
-                    if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
-                        products = edges[0]['node']['items']
-                        logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
-                        
-                        for product in products:
-                            try:
-                                # Extract product data with error handling
-                                name = product.get('name')
-                                slug = product.get('slug')
-                                tagline = product.get('tagline')
-                                
-                                # Extract thumbnail URL
-                                thumbnail_uuid = product.get('thumbnailImageUuid')
-                                thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
-                                
-                                # Extract short URL
-                                short_url = product.get('shortenedUrl')
-                                domain = f'https://producthunt.com{short_url}' if short_url else None
-                                
-                                # Extract rankings
-                                daily_rank = product.get('dailyRank')
-                                weekly_rank = product.get('weeklyRank')
-                                monthly_rank = product.get('monthlyRank')
-                                
-                                # Extract engagement metrics
-                                votes_count = product.get('votesCount')
-                                comments_count = product.get('commentsCount')
-                                latest_score = product.get('latestScore')
-                                launch_day_score = product.get('launchDayScore')
-                                
-                                # Extract timestamps
-                                created_at = product.get('createdAt')
-                                
-                                # Extract categories
-                                categories = None
-                                try:
-                                    topics = product.get('topics', {}).get('edges', [])
-                                    if topics:
-                                        category_names = [cat['name'] for cat in topics if cat.get('name')]
-                                        categories = ', '.join(category_names)
-                                except Exception:
-                                    categories = None
-                                
-                                product_data = Product(
-                                    id=product.get('id', ''),
-                                    name=name or '',
-                                    slug=slug or '',
-                                    tagline=tagline or '',
-                                    thumbnail_image_uuid=thumbnail_image_uuid,
-                                    domain=domain,
-                                    daily_rank=daily_rank,
-                                    weekly_rank=weekly_rank,
-                                    monthly_rank=monthly_rank,
-                                    votes_count=votes_count,
-                                    comments_count=comments_count,
-                                    latest_score=latest_score,
-                                    launch_day_score=launch_day_score,
-                                    created_at=created_at,
-                                    categories=categories
-                                )
-                                
-                                all_products.append(product_data)
-                                logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from GraphQL")
-                                
-                            except Exception as e:
-                                logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
-                                continue
-            
-            # Method 2: Direct webpage scraping for additional data
-            logger.info(f"🌐 Task {task_id}: Scraping main ProductHunt page for additional data")
+            # Method 1: Direct webpage scraping for homepage data (featured products first)
+            logger.info(f"🌐 Task {task_id}: Scraping main ProductHunt page for homepage data")
             
             headers = {
                 'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
@@ -587,17 +489,115 @@ def scrape_todays_launches_task(task_id: str):
                                 categories=categories
                             )
                             
-                            # Check if product already exists (avoid duplicates)
-                            existing_product = next((p for p in all_products if p.id == product_data.id), None)
-                            if not existing_product:
-                                all_products.append(product_data)
-                                logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from webpage")
-                            else:
-                                logger.debug(f"⏭️ Task {task_id}: Skipped duplicate product {product_data.name}")
+                            all_products.append(product_data)
+                            logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from webpage")
                                 
                         except Exception as e:
                             logger.warning(f"⚠️ Task {task_id}: Failed to extract product from webpage: {str(e)}")
                             continue
+            
+            # Method 2: GraphQL API call for unfeatured posts (secondary products)
+            logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
+            
+            params = {
+                'operationName': 'UnfeaturedPosts',
+                'variables': '{}',
+                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"96c4888ea89cb7a0ce6b621e09ec3a487a224ae73a77f578ceecbe5f4f2b5ac4"}}',
+            }
+            
+            base_url = 'https://www.producthunt.com/frontend/graphql'
+            url = base_url + '?' + urlencode(params)
+            
+            driver.get(url)
+            
+            # Wait for page to load
+            logger.info(f"⏳ Task {task_id}: Waiting for GraphQL response...")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "pre"))
+            )
+            
+            # Parse response
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            pre_content = soup.find('pre')
+            
+            if pre_content:
+                json_data = json.loads(pre_content.get_text())
+                
+                # Extract products from GraphQL response
+                if 'data' in json_data and 'homefeed' in json_data['data']:
+                    edges = json_data['data']['homefeed'].get('edges', [])
+                    if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
+                        products = edges[0]['node']['items']
+                        logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
+                        
+                        for product in products:
+                            try:
+                                # Extract product data with error handling
+                                name = product.get('name')
+                                slug = product.get('slug')
+                                tagline = product.get('tagline')
+                                
+                                # Extract thumbnail URL
+                                thumbnail_uuid = product.get('thumbnailImageUuid')
+                                thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
+                                
+                                # Extract short URL
+                                short_url = product.get('shortenedUrl')
+                                domain = f'https://producthunt.com{short_url}' if short_url else None
+                                
+                                # Extract rankings
+                                daily_rank = product.get('dailyRank')
+                                weekly_rank = product.get('weeklyRank')
+                                monthly_rank = product.get('monthlyRank')
+                                
+                                # Extract engagement metrics
+                                votes_count = product.get('votesCount')
+                                comments_count = product.get('commentsCount')
+                                latest_score = product.get('latestScore')
+                                launch_day_score = product.get('launchDayScore')
+                                
+                                # Extract timestamps
+                                created_at = product.get('createdAt')
+                                
+                                # Extract categories
+                                categories = None
+                                try:
+                                    topics = product.get('topics', {}).get('edges', [])
+                                    if topics:
+                                        category_names = [cat['name'] for cat in topics if cat.get('name')]
+                                        categories = ', '.join(category_names)
+                                except Exception:
+                                    categories = None
+                                
+                                product_data = Product(
+                                    id=product.get('id', ''),
+                                    name=name or '',
+                                    slug=slug or '',
+                                    tagline=tagline or '',
+                                    thumbnail_image_uuid=thumbnail_image_uuid,
+                                    domain=domain,
+                                    daily_rank=daily_rank,
+                                    weekly_rank=weekly_rank,
+                                    monthly_rank=monthly_rank,
+                                    votes_count=votes_count,
+                                    comments_count=comments_count,
+                                    latest_score=latest_score,
+                                    launch_day_score=launch_day_score,
+                                    created_at=created_at,
+                                    categories=categories
+                                )
+                                
+                                # Check if product already exists (avoid duplicates)
+                                existing_product = next((p for p in all_products if p.id == product_data.id), None)
+                                if not existing_product:
+                                    all_products.append(product_data)
+                                    logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from GraphQL")
+                                else:
+                                    logger.debug(f"⏭️ Task {task_id}: Skipped duplicate product {product_data.name}")
+                                
+                            except Exception as e:
+                                logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
+                                continue
             
             # Remove duplicates based on ID
             unique_products = []
