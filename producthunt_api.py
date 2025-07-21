@@ -1076,14 +1076,11 @@ def scrape_categories_task(task_id: str):
         logger.error(f"❌ Task {task_id} failed: {str(e)}")
 
 
-def scrape_category_products_task(task_id: str, category_slug: str):
+def scrape_category_products_task(task_id: str, category_slug: str, order: str = "highest_rated"):
     """Background task to scrape ProductHunt category products"""
     
     logger.info(f"🚀 Starting background task {task_id} for category products")
-    logger.info(f"📊 Category Slug: {category_slug}")
-    
-    # Always use highest_rated order
-    order = "highest_rated"
+    logger.info(f"📊 Category Slug: {category_slug}, Order: {order}")
     
     try:
         # Update task status to running
@@ -1103,8 +1100,8 @@ def scrape_category_products_task(task_id: str, category_slug: str):
             # Step 1: Get initial data from the category page
             logger.info("📡 Step 1: Fetching initial data from ProductHunt category page")
             
-            # Build the category URL using slug
-            category_url = f'https://www.producthunt.com/categories/{category_slug}'
+            # Build the category URL using slug and order
+            category_url = f'https://www.producthunt.com/categories/{category_slug}?order={order}'
             
             logger.info(f"🌐 Fetching category page: {category_url}")
             
@@ -1237,8 +1234,8 @@ def scrape_category_products_task(task_id: str, category_slug: str):
                 "has_next_page": has_next_page,
                 "end_cursor": cursor
             }
-            cache.set("category_products", cache_data, category_slug=category_slug)
-            logger.info(f"💾 Cached category products data for task {task_id} - {category_slug}")
+            cache.set("category_products", cache_data, category_slug=category_slug, order=order)
+            logger.info(f"💾 Cached category products data for task {task_id} - {category_slug} (order: {order})")
         
         # Update task status to completed
         task_status[task_id].status = "completed"
@@ -1876,17 +1873,26 @@ async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
 @router.get("/category_products")
 async def get_category_products(
     category_slug: str = Query(..., description="Category slug (e.g., ai-notetakers)"),
+    order: str = Query(default="highest_rated", description="Order: highest_rated, top_free, best_rated, recent_launches, trending"),
     page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
     limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
-    """Get ProductHunt products from a specific category (sorted by highest rated)"""
+    """Get ProductHunt products from a specific category with specified ordering"""
     
-    logger.info(f"📥 Received GET request for category products - Slug: {category_slug} (page={page}, limit={limit})")
+    # Validate order parameter
+    valid_orders = ["highest_rated", "top_free", "best_rated", "recent_launches", "trending"]
+    if order not in valid_orders:
+        raise HTTPException(
+            status_code=400, 
+            detail=f"Invalid order parameter. Must be one of: {', '.join(valid_orders)}"
+        )
+    
+    logger.info(f"📥 Received GET request for category products - Slug: {category_slug}, Order: {order} (page={page}, limit={limit})")
     
     # Check cache first
     if CACHE_AVAILABLE and cache:
-        cached_data = cache.get("category_products", category_slug=category_slug)
+        cached_data = cache.get("category_products", category_slug=category_slug, order=order)
         if cached_data and "products" in cached_data:
             logger.info(f"✅ Returning cached data for category products - {category_slug}")
             
@@ -1905,7 +1911,7 @@ async def get_category_products(
             has_prev_page = page > 1
             
             # Create navigation URLs
-            base_url = f"/producthunt/category_products?category_slug={category_slug}"
+            base_url = f"/producthunt/category_products?category_slug={category_slug}&order={order}"
             next_url = f"{base_url}&page={page + 1}&limit={limit}" if has_next_page else None
             prev_url = f"{base_url}&page={page - 1}&limit={limit}" if has_prev_page else None
             first_url = f"{base_url}&page=1&limit={limit}" if has_prev_page else None
@@ -1931,7 +1937,7 @@ async def get_category_products(
                     "last_url": last_url
                 },
                 "category_slug": category_slug,
-                "order": "highest_rated"
+                "order": order
             }
     
     # If no cache, start scraping
@@ -1945,7 +1951,7 @@ async def get_category_products(
     logger.info(f"🆔 Created task {task_id} for category products")
     
     # Start background task
-    background_tasks.add_task(scrape_category_products_task, task_id, category_slug)
+    background_tasks.add_task(scrape_category_products_task, task_id, category_slug, order)
     
     logger.info(f"✅ Task {task_id} queued successfully for category products")
     
@@ -1954,7 +1960,7 @@ async def get_category_products(
         "message": "Scraping category products started", 
         "status": "pending",
         "category_slug": category_slug,
-        "order": "highest_rated",
+        "order": order,
         "date": datetime.now().strftime("%Y-%m-%d"),
         "rank_type": "category_products",
         "status_url": f"/producthunt/status/{task_id}"
