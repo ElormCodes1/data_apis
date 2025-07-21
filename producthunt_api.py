@@ -477,6 +477,9 @@ def scrape_todays_launches_task(task_id: str):
                             short_url = product.get('shortenedUrl')
                             domain = f'https://producthunt.com{short_url}' if short_url else None
                             
+                            # Construct product URL
+                            url = f'https://producthunt.com/products/{slug}' if slug else None
+                            
                             # Extract rankings
                             daily_rank = product.get('dailyRank')
                             weekly_rank = product.get('weeklyRank')
@@ -508,6 +511,7 @@ def scrape_todays_launches_task(task_id: str):
                                 tagline=tagline or '',
                                 thumbnail_image_uuid=thumbnail_image_uuid,
                                 domain=domain,
+                                url=url,
                                 daily_rank=daily_rank,
                                 weekly_rank=weekly_rank,
                                 monthly_rank=monthly_rank,
@@ -575,6 +579,9 @@ def scrape_todays_launches_task(task_id: str):
                                 short_url = product.get('shortenedUrl')
                                 domain = f'https://producthunt.com{short_url}' if short_url else None
                                 
+                                # Construct product URL
+                                url = f'https://producthunt.com/products/{slug}' if slug else None
+                                
                                 # Extract rankings
                                 daily_rank = product.get('dailyRank')
                                 weekly_rank = product.get('weeklyRank')
@@ -606,6 +613,7 @@ def scrape_todays_launches_task(task_id: str):
                                     tagline=tagline or '',
                                     thumbnail_image_uuid=thumbnail_image_uuid,
                                     domain=domain,
+                                    url=url,
                                     daily_rank=daily_rank,
                                     weekly_rank=weekly_rank,
                                     monthly_rank=monthly_rank,
