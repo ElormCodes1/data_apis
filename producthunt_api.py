@@ -51,6 +51,7 @@ class Product(BaseModel):
     tagline: str
     thumbnail_image_uuid: Optional[str] = None
     domain: Optional[str] = None
+    url: Optional[str] = None
     daily_rank: Optional[str] = None
     weekly_rank: Optional[str] = None
     monthly_rank: Optional[str] = None
@@ -80,6 +81,7 @@ class ProductHuntCategory(BaseModel):
     name: str
     url: str
     id: str
+    slug: str
 
 
 class CategoryProduct(BaseModel):
@@ -91,7 +93,6 @@ class CategoryProduct(BaseModel):
     reviews_count: Optional[int] = None
     reviews_rating: Optional[float] = None
     url: Optional[str] = None
-    created_at: Optional[str] = None
     categories: Optional[str] = None
     description: Optional[str] = None
     media_images: Optional[List[str]] = None
@@ -213,6 +214,9 @@ def extract_product_data(product_node: Dict[str, Any]) -> Product:
     short_url = product_node.get('shortenedUrl')
     domain = f'https://producthunt.com{short_url}' if short_url else None
     
+    # Construct product URL
+    url = f'https://producthunt.com/products/{slug}' if slug else None
+    
     # Extract rankings
     daily_rank = product_node.get('dailyRank')
     weekly_rank = product_node.get('weeklyRank')
@@ -244,6 +248,7 @@ def extract_product_data(product_node: Dict[str, Any]) -> Product:
         tagline=tagline or '',
         thumbnail_image_uuid=thumbnail_image_uuid,
         domain=domain,
+        url=url,
         daily_rank=daily_rank,
         weekly_rank=weekly_rank,
         monthly_rank=monthly_rank,
@@ -829,9 +834,15 @@ def scrape_upcoming_launches_task(task_id: str):
         
         task_results[task_id] = result_data
         
-        # Cache the results
+        # Cache the results (convert products to dictionaries for JSON serialization)
         if CACHE_AVAILABLE and cache:
-            cache.set("upcoming_launches", result_data)
+            products_dict = [product.dict() for product in all_products]
+            cache_data = {
+                "products": products_dict,
+                "has_next_page": has_next_page,
+                "end_cursor": cursor
+            }
+            cache.set("upcoming_launches", cache_data)
             logger.info(f"💾 Cached upcoming launches data for task {task_id}")
         
         # Update task status to completed
@@ -977,13 +988,18 @@ def scrape_categories_task(task_id: str):
                     
                     for sub_category in sub_categories:
                         try:
+                            # Extract slug from URL path
+                            url_path = sub_category['path']
+                            slug = url_path.split('/')[-1] if url_path else ""
+                            
                             category_data = ProductHuntCategory(
                                 name=sub_category['name'],
                                 url="https://producthunt.com" + sub_category['path'],
-                                id=sub_category['id']
+                                id=sub_category['id'],
+                                slug=slug
                             )
                             category_list.append(category_data)
-                            logger.info(f"✅ Extracted category: {category_data.name}")
+                            logger.info(f"✅ Extracted category: {category_data.name} (slug: {slug})")
                         except Exception as e:
                             logger.error(f"❌ Error extracting subcategory data: {str(e)}")
                             continue
@@ -1198,9 +1214,15 @@ def scrape_category_products_task(task_id: str, category_slug: str):
         
         task_results[task_id] = result_data
         
-        # Cache the results
+        # Cache the results (convert products to dictionaries for JSON serialization)
         if CACHE_AVAILABLE and cache:
-            cache.set("category_products", result_data, category_slug=category_slug)
+            products_dict = [product.dict() for product in all_products]
+            cache_data = {
+                "products": products_dict,
+                "has_next_page": has_next_page,
+                "end_cursor": cursor
+            }
+            cache.set("category_products", cache_data, category_slug=category_slug)
             logger.info(f"💾 Cached category products data for task {task_id} - {category_slug}")
         
         # Update task status to completed
@@ -1252,18 +1274,15 @@ def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[Cate
         reviews_count = product_node.get('reviewsCount')
         reviews_rating = product_node.get('reviewsRating')
         
-        # Extract URL and timestamps
+        # Extract URL
         path = product_node.get('path')
         url = f"https://producthunt.com{path}" if path else None
-        created_at = product_node.get('createdAt')
         
         # Extract categories
         categories = None
         try:
-            topics = product_node.get('topics', {}).get('edges', [])
-            if topics:
-                category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
-                categories = ', '.join(category_names)
+            if product_node.get('categories'):
+                categories = ', '.join([cat['name'] for cat in product_node['categories']])
         except Exception:
             categories = None
         
@@ -1292,7 +1311,6 @@ def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[Cate
             reviews_count=reviews_count,
             reviews_rating=reviews_rating,
             url=url,
-            created_at=created_at,
             categories=categories,
             description=description,
             media_images=media_images,
@@ -1713,23 +1731,61 @@ async def get_todays_launches(
 
 
 @router.get("/upcoming_launches")
-async def get_upcoming_launches(background_tasks: BackgroundTasks = BackgroundTasks()):
+async def get_upcoming_launches(
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     """Get ProductHunt upcoming launches"""
     
-    logger.info(f"📥 Received GET request for upcoming launches")
+    logger.info(f"📥 Received GET request for upcoming launches (page={page}, limit={limit})")
     
     # Check cache first
     if CACHE_AVAILABLE and cache:
         cached_data = cache.get("upcoming_launches")
-        if cached_data:
+        if cached_data and "products" in cached_data:
             logger.info("✅ Returning cached data for upcoming launches")
+            
+            # Get cached products
+            cached_products = cached_data["products"]
+            total_products = len(cached_products)
+            
+            # Calculate pagination
+            start_idx = (page - 1) * limit
+            end_idx = start_idx + limit
+            paginated_products = cached_products[start_idx:end_idx]
+            
+            # Calculate pagination metadata
+            total_pages = (total_products + limit - 1) // limit
+            has_next_page = page < total_pages
+            has_prev_page = page > 1
+            
+            # Create navigation URLs
+            base_url = "/producthunt/upcoming_launches"
+            next_url = f"{base_url}?page={page + 1}&limit={limit}" if has_next_page else None
+            prev_url = f"{base_url}?page={page - 1}&limit={limit}" if has_prev_page else None
+            first_url = f"{base_url}?page=1&limit={limit}" if has_prev_page else None
+            last_url = f"{base_url}?page={total_pages}&limit={limit}" if has_next_page else None
+            
+            # Products are already dictionaries from cache, no need to convert
+            products_data = paginated_products
+            
             return {
-                "message": "Cached data retrieved successfully",
-                "status": "completed",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "rank_type": "upcoming_launches",
-                "cached": True,
-                "data": cached_data
+                "products": products_data,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total_products": total_products,
+                    "total_pages": total_pages,
+                    "has_next_page": has_next_page,
+                    "has_prev_page": has_prev_page
+                },
+                "navigation": {
+                    "next_url": next_url,
+                    "prev_url": prev_url,
+                    "first_url": first_url,
+                    "last_url": last_url
+                }
             }
     
     # If no cache, start scraping
@@ -1805,26 +1861,62 @@ async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
 @router.get("/category_products")
 async def get_category_products(
     category_slug: str = Query(..., description="Category slug (e.g., ai-notetakers)"),
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Get ProductHunt products from a specific category (sorted by highest rated)"""
     
-    logger.info(f"📥 Received GET request for category products - Slug: {category_slug}")
+    logger.info(f"📥 Received GET request for category products - Slug: {category_slug} (page={page}, limit={limit})")
     
     # Check cache first
     if CACHE_AVAILABLE and cache:
         cached_data = cache.get("category_products", category_slug=category_slug)
-        if cached_data:
+        if cached_data and "products" in cached_data:
             logger.info(f"✅ Returning cached data for category products - {category_slug}")
+            
+            # Get cached products
+            cached_products = cached_data["products"]
+            total_products = len(cached_products)
+            
+            # Calculate pagination
+            start_idx = (page - 1) * limit
+            end_idx = start_idx + limit
+            paginated_products = cached_products[start_idx:end_idx]
+            
+            # Calculate pagination metadata
+            total_pages = (total_products + limit - 1) // limit
+            has_next_page = page < total_pages
+            has_prev_page = page > 1
+            
+            # Create navigation URLs
+            base_url = f"/producthunt/category_products?category_slug={category_slug}"
+            next_url = f"{base_url}&page={page + 1}&limit={limit}" if has_next_page else None
+            prev_url = f"{base_url}&page={page - 1}&limit={limit}" if has_prev_page else None
+            first_url = f"{base_url}&page=1&limit={limit}" if has_prev_page else None
+            last_url = f"{base_url}&page={total_pages}&limit={limit}" if has_next_page else None
+            
+            # Products are already dictionaries from cache, no need to convert
+            products_data = paginated_products
+            
             return {
-                "message": "Cached data retrieved successfully",
-                "status": "completed",
+                "products": products_data,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total_products": total_products,
+                    "total_pages": total_pages,
+                    "has_next_page": has_next_page,
+                    "has_prev_page": has_prev_page
+                },
+                "navigation": {
+                    "next_url": next_url,
+                    "prev_url": prev_url,
+                    "first_url": first_url,
+                    "last_url": last_url
+                },
                 "category_slug": category_slug,
-                "order": "highest_rated",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "rank_type": "category_products",
-                "cached": True,
-                "data": cached_data
+                "order": "highest_rated"
             }
     
     # If no cache, start scraping
