@@ -401,7 +401,8 @@ def scrape_todays_launches_task(task_id: str):
         task_status[task_id].created_at = datetime.now()
         logger.info(f"📊 Task {task_id} status set to running")
         
-        all_products = []
+        homepage_products = []  # Featured products from homepage
+        graphql_products = []   # Additional products from GraphQL
         
         logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
         driver = setup_chrome_driver()
@@ -454,7 +455,7 @@ def scrape_todays_launches_task(task_id: str):
                 edges = event_data.get('edges', [])
                 if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
                     products = edges[0]['node']['items']
-                    logger.info(f"📋 Task {task_id}: Found {len(products)} products from webpage")
+                    logger.info(f"📋 Task {task_id}: Found {len(products)} products from homepage")
                     
                     for product in products:
                         try:
@@ -490,7 +491,7 @@ def scrape_todays_launches_task(task_id: str):
                             try:
                                 topics = product.get('topics', {}).get('edges', [])
                                 if topics:
-                                    category_names = [cat['name'] for cat in topics if cat.get('name')]
+                                    category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
                                     categories = ', '.join(category_names)
                             except Exception:
                                 categories = None
@@ -513,11 +514,11 @@ def scrape_todays_launches_task(task_id: str):
                                 categories=categories
                             )
                             
-                            all_products.append(product_data)
-                            logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from webpage")
+                            homepage_products.append(product_data)
+                            logger.debug(f"✅ Task {task_id}: Extracted homepage product {product_data.name}")
                                 
                         except Exception as e:
-                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from webpage: {str(e)}")
+                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from homepage: {str(e)}")
                             continue
             
             # Method 2: GraphQL API call for unfeatured posts (secondary products)
@@ -588,7 +589,7 @@ def scrape_todays_launches_task(task_id: str):
                                 try:
                                     topics = product.get('topics', {}).get('edges', [])
                                     if topics:
-                                        category_names = [cat['name'] for cat in topics if cat.get('name')]
+                                        category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
                                         categories = ', '.join(category_names)
                                 except Exception:
                                     categories = None
@@ -611,32 +612,32 @@ def scrape_todays_launches_task(task_id: str):
                                     categories=categories
                                 )
                                 
-                                # Check if product already exists (avoid duplicates)
-                                existing_product = next((p for p in all_products if p.id == product_data.id), None)
-                                if not existing_product:
-                                    all_products.append(product_data)
-                                    logger.debug(f"✅ Task {task_id}: Extracted product {product_data.name} from GraphQL")
-                                else:
-                                    logger.debug(f"⏭️ Task {task_id}: Skipped duplicate product {product_data.name}")
+                                graphql_products.append(product_data)
+                                logger.debug(f"✅ Task {task_id}: Extracted GraphQL product {product_data.name}")
                                 
                             except Exception as e:
                                 logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
                                 continue
             
-            # Remove duplicates based on ID
-            unique_products = []
-            seen_ids = set()
-            for product in all_products:
-                if product.id and product.id not in seen_ids:
-                    unique_products.append(product)
-                    seen_ids.add(product.id)
-                elif not product.id:
-                    # If no ID, use name as fallback
-                    if product.name and product.name not in seen_ids:
-                        unique_products.append(product)
-                        seen_ids.add(product.name)
+            # Combine products with homepage products first, then GraphQL products
+            # Remove duplicates from GraphQL products that already exist in homepage
+            homepage_ids = {p.id for p in homepage_products if p.id}
+            homepage_names = {p.name for p in homepage_products if p.name and not p.id}
             
-            all_products = unique_products
+            # Filter out duplicates from GraphQL products
+            unique_graphql_products = []
+            for product in graphql_products:
+                if product.id and product.id not in homepage_ids:
+                    unique_graphql_products.append(product)
+                elif product.name and product.name not in homepage_names:
+                    unique_graphql_products.append(product)
+                else:
+                    logger.debug(f"⏭️ Task {task_id}: Skipped duplicate GraphQL product {product.name}")
+            
+            # Combine: homepage products first, then unique GraphQL products
+            all_products = homepage_products + unique_graphql_products
+            
+            logger.info(f"📊 Task {task_id}: Combined {len(homepage_products)} homepage products + {len(unique_graphql_products)} unique GraphQL products = {len(all_products)} total")
             
         finally:
             logger.info(f"🧹 Task {task_id}: Closing Chrome WebDriver")
@@ -660,9 +661,15 @@ def scrape_todays_launches_task(task_id: str):
         
         task_results[task_id] = result_data
         
-        # Cache the results
+        # Cache the results (convert products to dictionaries for JSON serialization)
         if CACHE_AVAILABLE and cache:
-            cache.set("todays_launches", result_data)
+            products_dict = [product.dict() for product in all_products]
+            cache_data = {
+                "products": products_dict,
+                "has_next_page": False,
+                "end_cursor": None
+            }
+            cache.set("todays_launches", cache_data)
             logger.info(f"💾 Cached today's launches data for task {task_id}")
         
         return all_products, False, None
@@ -1623,23 +1630,61 @@ async def get_yearly_rankings(
     }
 
 @router.get("/todays_launches")
-async def get_todays_launches(background_tasks: BackgroundTasks = BackgroundTasks()):
+async def get_todays_launches(
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
+    background_tasks: BackgroundTasks = BackgroundTasks()
+):
     """Get today's ProductHunt launches"""
     
-    logger.info(f"📥 Received GET request for today's launches")
+    logger.info(f"📥 Received GET request for today's launches (page={page}, limit={limit})")
     
     # Check cache first
     if CACHE_AVAILABLE and cache:
         cached_data = cache.get("todays_launches")
-        if cached_data:
+        if cached_data and "products" in cached_data:
             logger.info("✅ Returning cached data for today's launches")
+            
+            # Get cached products
+            cached_products = cached_data["products"]
+            total_products = len(cached_products)
+            
+            # Calculate pagination
+            start_idx = (page - 1) * limit
+            end_idx = start_idx + limit
+            paginated_products = cached_products[start_idx:end_idx]
+            
+            # Calculate pagination metadata
+            total_pages = (total_products + limit - 1) // limit
+            has_next_page = page < total_pages
+            has_prev_page = page > 1
+            
+            # Create navigation URLs
+            base_url = "/producthunt/todays_launches"
+            next_url = f"{base_url}?page={page + 1}&limit={limit}" if has_next_page else None
+            prev_url = f"{base_url}?page={page - 1}&limit={limit}" if has_prev_page else None
+            first_url = f"{base_url}?page=1&limit={limit}" if has_prev_page else None
+            last_url = f"{base_url}?page={total_pages}&limit={limit}" if has_next_page else None
+            
+            # Products are already dictionaries from cache, no need to convert
+            products_data = paginated_products
+            
             return {
-                "message": "Cached data retrieved successfully",
-                "status": "completed",
-                "date": datetime.now().strftime("%Y-%m-%d"),
-                "rank_type": "todays_launches",
-                "cached": True,
-                "data": cached_data
+                "products": products_data,
+                "pagination": {
+                    "page": page,
+                    "limit": limit,
+                    "total_products": total_products,
+                    "total_pages": total_pages,
+                    "has_next_page": has_next_page,
+                    "has_prev_page": has_prev_page
+                },
+                "navigation": {
+                    "next_url": next_url,
+                    "prev_url": prev_url,
+                    "first_url": first_url,
+                    "last_url": last_url
+                }
             }
     
     # If no cache, start scraping
