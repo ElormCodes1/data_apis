@@ -1345,6 +1345,12 @@ async def get_daily_rankings(
                     "start_index": start_index,
                     "end_index": end_index
                 },
+                "navigation": {
+                    "next_page": f"/producthunt/products/daily?year={year}&month={month}&day={day}&page={page+1}&limit={limit}" if has_next_page else None,
+                    "previous_page": f"/producthunt/products/daily?year={year}&month={month}&day={day}&page={page-1}&limit={limit}" if has_previous_page else None,
+                    "first_page": f"/producthunt/products/daily?year={year}&month={month}&day={day}&page=1&limit={limit}",
+                    "last_page": f"/producthunt/products/daily?year={year}&month={month}&day={day}&page={total_pages}&limit={limit}"
+                },
                 "date": date,
                 "rank_type": "daily",
                 "scraped_at": cached_data.get("scraped_at")
@@ -1419,6 +1425,12 @@ async def get_weekly_rankings(
                     "has_previous_page": has_previous_page,
                     "start_index": start_index,
                     "end_index": end_index
+                },
+                "navigation": {
+                    "next_page": f"/producthunt/products/weekly?year={year}&week={week}&page={page+1}&limit={limit}" if has_next_page else None,
+                    "previous_page": f"/producthunt/products/weekly?year={year}&week={week}&page={page-1}&limit={limit}" if has_previous_page else None,
+                    "first_page": f"/producthunt/products/weekly?year={year}&week={week}&page=1&limit={limit}",
+                    "last_page": f"/producthunt/products/weekly?year={year}&week={week}&page={total_pages}&limit={limit}"
                 },
                 "date": date,
                 "rank_type": "weekly",
@@ -1495,6 +1507,12 @@ async def get_monthly_rankings(
                     "start_index": start_index,
                     "end_index": end_index
                 },
+                "navigation": {
+                    "next_page": f"/producthunt/products/monthly?year={year}&month={month}&page={page+1}&limit={limit}" if has_next_page else None,
+                    "previous_page": f"/producthunt/products/monthly?year={year}&month={month}&page={page-1}&limit={limit}" if has_previous_page else None,
+                    "first_page": f"/producthunt/products/monthly?year={year}&month={month}&page=1&limit={limit}",
+                    "last_page": f"/producthunt/products/monthly?year={year}&month={month}&page={total_pages}&limit={limit}"
+                },
                 "date": date,
                 "rank_type": "monthly",
                 "scraped_at": cached_data.get("scraped_at")
@@ -1568,6 +1586,12 @@ async def get_yearly_rankings(
                     "has_previous_page": has_previous_page,
                     "start_index": start_index,
                     "end_index": end_index
+                },
+                "navigation": {
+                    "next_page": f"/producthunt/products/yearly?year={year}&page={page+1}&limit={limit}" if has_next_page else None,
+                    "previous_page": f"/producthunt/products/yearly?year={year}&page={page-1}&limit={limit}" if has_previous_page else None,
+                    "first_page": f"/producthunt/products/yearly?year={year}&page=1&limit={limit}",
+                    "last_page": f"/producthunt/products/yearly?year={year}&page={total_pages}&limit={limit}"
                 },
                 "date": date,
                 "rank_type": "yearly",
