@@ -983,8 +983,23 @@ def scrape_categories_task(task_id: str):
             
             for category in product_categories:
                 try:
-                    sub_categories = category['node']['subCategories']['nodes']
-                    logger.info(f"📂 Processing category: {category['node'].get('name', 'Unknown')} with {len(sub_categories)} subcategories")
+                    # Extract major category first
+                    major_category_node = category['node']
+                    major_url_path = major_category_node['path']
+                    major_slug = major_url_path.split('/')[-1] if major_url_path else ""
+                    
+                    major_category_data = ProductHuntCategory(
+                        name=major_category_node['name'],
+                        url="https://producthunt.com" + major_category_node['path'],
+                        id=major_category_node['id'],
+                        slug=major_slug
+                    )
+                    category_list.append(major_category_data)
+                    logger.info(f"✅ Extracted major category: {major_category_data.name} (slug: {major_slug})")
+                    
+                    # Extract subcategories
+                    sub_categories = major_category_node['subCategories']['nodes']
+                    logger.info(f"📂 Processing subcategories for: {major_category_node.get('name', 'Unknown')} with {len(sub_categories)} subcategories")
                     
                     for sub_category in sub_categories:
                         try:
@@ -999,7 +1014,7 @@ def scrape_categories_task(task_id: str):
                                 slug=slug
                             )
                             category_list.append(category_data)
-                            logger.info(f"✅ Extracted category: {category_data.name} (slug: {slug})")
+                            logger.info(f"✅ Extracted subcategory: {category_data.name} (slug: {slug})")
                         except Exception as e:
                             logger.error(f"❌ Error extracting subcategory data: {str(e)}")
                             continue
