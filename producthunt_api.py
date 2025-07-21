@@ -1303,6 +1303,8 @@ async def get_daily_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
     month: int = Query(..., description="Month (1-12)"),
     day: int = Query(..., description="Day (1-31)"),
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Get daily ProductHunt rankings for a specific date"""
@@ -1315,11 +1317,34 @@ async def get_daily_rankings(
         cached_data = cache.get("daily_rankings", date=date)
         if cached_data:
             logger.info("✅ Returning cached data for daily rankings")
+            
+            # Get all products from cache
+            all_products = cached_data.get("products", [])
+            total_products = len(all_products)
+            
+            # Calculate pagination
+            total_pages = (total_products + limit - 1) // limit
+            start_index = (page - 1) * limit
+            end_index = min(start_index + limit, total_products)
+            
+            # Get products for current page
+            page_products = all_products[start_index:end_index]
+            
+            # Calculate pagination info
+            has_next_page = page < total_pages
+            has_previous_page = page > 1
+            
             return {
-                "products": cached_data.get("products", []),
-                "total_products": cached_data.get("total_products", 0),
-                "has_next_page": cached_data.get("has_next_page", False),
-                "end_cursor": cached_data.get("end_cursor"),
+                "products": page_products,
+                "pagination": {
+                    "current_page": page,
+                    "total_pages": total_pages,
+                    "total_products": total_products,
+                    "has_next_page": has_next_page,
+                    "has_previous_page": has_previous_page,
+                    "start_index": start_index,
+                    "end_index": end_index
+                },
                 "date": date,
                 "rank_type": "daily",
                 "scraped_at": cached_data.get("scraped_at")
@@ -1353,6 +1378,8 @@ async def get_daily_rankings(
 async def get_weekly_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
     week: int = Query(..., description="Week number (1-52)"),
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Get weekly ProductHunt rankings for a specific year and week"""
@@ -1365,11 +1392,34 @@ async def get_weekly_rankings(
         cached_data = cache.get("weekly_rankings", date=date)
         if cached_data:
             logger.info("✅ Returning cached data for weekly rankings")
+            
+            # Get all products from cache
+            all_products = cached_data.get("products", [])
+            total_products = len(all_products)
+            
+            # Calculate pagination
+            total_pages = (total_products + limit - 1) // limit
+            start_index = (page - 1) * limit
+            end_index = min(start_index + limit, total_products)
+            
+            # Get products for current page
+            page_products = all_products[start_index:end_index]
+            
+            # Calculate pagination info
+            has_next_page = page < total_pages
+            has_previous_page = page > 1
+            
             return {
-                "products": cached_data.get("products", []),
-                "total_products": cached_data.get("total_products", 0),
-                "has_next_page": cached_data.get("has_next_page", False),
-                "end_cursor": cached_data.get("end_cursor"),
+                "products": page_products,
+                "pagination": {
+                    "current_page": page,
+                    "total_pages": total_pages,
+                    "total_products": total_products,
+                    "has_next_page": has_next_page,
+                    "has_previous_page": has_previous_page,
+                    "start_index": start_index,
+                    "end_index": end_index
+                },
                 "date": date,
                 "rank_type": "weekly",
                 "scraped_at": cached_data.get("scraped_at")
@@ -1403,6 +1453,8 @@ async def get_weekly_rankings(
 async def get_monthly_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
     month: int = Query(..., description="Month (1-12)"),
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Get monthly ProductHunt rankings for a specific year and month"""
@@ -1415,11 +1467,34 @@ async def get_monthly_rankings(
         cached_data = cache.get("monthly_rankings", date=date)
         if cached_data:
             logger.info("✅ Returning cached data for monthly rankings")
+            
+            # Get all products from cache
+            all_products = cached_data.get("products", [])
+            total_products = len(all_products)
+            
+            # Calculate pagination
+            total_pages = (total_products + limit - 1) // limit
+            start_index = (page - 1) * limit
+            end_index = min(start_index + limit, total_products)
+            
+            # Get products for current page
+            page_products = all_products[start_index:end_index]
+            
+            # Calculate pagination info
+            has_next_page = page < total_pages
+            has_previous_page = page > 1
+            
             return {
-                "products": cached_data.get("products", []),
-                "total_products": cached_data.get("total_products", 0),
-                "has_next_page": cached_data.get("has_next_page", False),
-                "end_cursor": cached_data.get("end_cursor"),
+                "products": page_products,
+                "pagination": {
+                    "current_page": page,
+                    "total_pages": total_pages,
+                    "total_products": total_products,
+                    "has_next_page": has_next_page,
+                    "has_previous_page": has_previous_page,
+                    "start_index": start_index,
+                    "end_index": end_index
+                },
                 "date": date,
                 "rank_type": "monthly",
                 "scraped_at": cached_data.get("scraped_at")
@@ -1452,6 +1527,8 @@ async def get_monthly_rankings(
 @router.get("/products/yearly")
 async def get_yearly_rankings(
     year: int = Query(..., description="Year (e.g., 2024)"),
+    page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
+    limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 300)"),
     background_tasks: BackgroundTasks = BackgroundTasks()
 ):
     """Get yearly ProductHunt rankings for a specific year"""
@@ -1464,11 +1541,34 @@ async def get_yearly_rankings(
         cached_data = cache.get("yearly_rankings", date=date)
         if cached_data:
             logger.info("✅ Returning cached data for yearly rankings")
+            
+            # Get all products from cache
+            all_products = cached_data.get("products", [])
+            total_products = len(all_products)
+            
+            # Calculate pagination
+            total_pages = (total_products + limit - 1) // limit
+            start_index = (page - 1) * limit
+            end_index = min(start_index + limit, total_products)
+            
+            # Get products for current page
+            page_products = all_products[start_index:end_index]
+            
+            # Calculate pagination info
+            has_next_page = page < total_pages
+            has_previous_page = page > 1
+            
             return {
-                "products": cached_data.get("products", []),
-                "total_products": cached_data.get("total_products", 0),
-                "has_next_page": cached_data.get("has_next_page", False),
-                "end_cursor": cached_data.get("end_cursor"),
+                "products": page_products,
+                "pagination": {
+                    "current_page": page,
+                    "total_pages": total_pages,
+                    "total_products": total_products,
+                    "has_next_page": has_next_page,
+                    "has_previous_page": has_previous_page,
+                    "start_index": start_index,
+                    "end_index": end_index
+                },
                 "date": date,
                 "rank_type": "yearly",
                 "scraped_at": cached_data.get("scraped_at")
