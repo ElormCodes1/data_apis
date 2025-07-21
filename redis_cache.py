@@ -11,10 +11,10 @@ logger = logging.getLogger(__name__)
 
 class ProductHuntCache:
     """Redis cache implementation for ProductHunt API"""
-    
+    # os.getenv('REDIS_HOST_I') or
     def __init__(self):
         # Redis connection configuration
-        self.redis_host = os.getenv('REDIS_HOST_I') or os.getenv('REDIS_HOST_P')
+        self.redis_host =  os.getenv('REDIS_HOST_P')
         self.redis_port = int(os.getenv('REDIS_PORT', 6379))
         self.redis_password = os.getenv('REDIS_PASSWORD', None)
         self.redis_db = int(os.getenv('REDIS_DB', 1))
@@ -71,7 +71,8 @@ class ProductHuntCache:
         
         elif endpoint == "category_products":
             category_slug = params.get('category_slug', 'unknown')
-            return f"producthunt:category_products:{category_slug}:{today.strftime('%Y-%m-%d')}"
+            order = params.get('order', 'highest_rated')
+            return f"producthunt:category_products:{category_slug}:{order}:{today.strftime('%Y-%m-%d')}"
         
         elif endpoint in ["daily_rankings", "weekly_rankings", "monthly_rankings", "yearly_rankings"]:
             rank_type = endpoint.replace("_rankings", "")
