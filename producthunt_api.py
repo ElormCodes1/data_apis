@@ -1,7 +1,7 @@
 from fastapi import APIRouter, HTTPException, BackgroundTasks, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any, Tuple
 from urllib.parse import urlparse
 import asyncio
 import json
@@ -11,7 +11,7 @@ import logging
 import traceback
 import requests
 import aiohttp
-import concurrent.futures
+import ssl
 from datetime import datetime
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
@@ -28,6 +28,70 @@ try:
 except ImportError:
     CACHE_AVAILABLE = False
     cache = None
+
+async def resolve_domain(session: aiohttp.ClientSession, domain: str, name: str, task_id: str) -> Tuple[str, str]:
+    """Resolve a single domain asynchronously"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    try:
+        # If it's already a full URL, use it directly
+        if domain.startswith('http'):
+            url = domain
+        else:
+            url = f"https://{domain}"
+            
+        async with session.get(url, headers=headers, allow_redirects=True, timeout=10) as response:
+            final_url = str(response.url)
+            resolved_domain = urlparse(final_url).netloc
+            logger.info(f"✅ Task {task_id}: Resolved domain for {name}: {resolved_domain}")
+            return domain, resolved_domain
+    except Exception as e:
+        logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain for {name}: {domain}. Error: {str(e)}")
+        return domain, domain
+
+async def resolve_domains_batch(domains_data: List[Tuple[str, str, str]], task_id: str, batch_size: int = 100) -> Dict[str, str]:
+    """Resolve multiple domains concurrently in batches"""
+    resolved_domains = {}
+    
+    # If cache is available, check cache first
+    if CACHE_AVAILABLE and cache:
+        for domain, name, _ in domains_data:
+            cached_domain = cache.get(f"domain:{domain}")
+            if cached_domain:
+                resolved_domains[domain] = cached_domain
+                logger.info(f"🎯 Task {task_id}: Cache hit for domain: {domain}")
+                domains_data = [d for d in domains_data if d[0] != domain]
+
+    # Only proceed with HTTP requests if there are unresolved domains
+    if domains_data:
+        # Configure SSL context to handle certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds total timeout
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            for i in range(0, len(domains_data), batch_size):
+                batch = domains_data[i:i + batch_size]
+                tasks = [resolve_domain(session, domain, name, task_id) for domain, name, _ in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for (original_domain, resolved_domain) in results:
+                    if isinstance(resolved_domain, Exception):
+                        resolved_domains[original_domain] = original_domain
+                    else:
+                        resolved_domains[original_domain] = resolved_domain
+                        # Cache the result if cache is available
+                        if CACHE_AVAILABLE and cache:
+                            try:
+                                cache.set(f"domain:{original_domain}", resolved_domain, expire=86400)  # Cache for 24 hours
+                            except Exception as e:
+                                logger.warning(f"⚠️ Task {task_id}: Failed to cache domain {original_domain}: {str(e)}")
+    
+    return resolved_domains
 
 # Configure logging
 logging.basicConfig(
@@ -46,82 +110,6 @@ router = APIRouter()
 # In-memory storage for task status and results (in production, use Redis or database)
 task_status = {}
 task_results = {}
-
-async def resolve_domains_parallel(domain_urls: List[tuple]) -> Dict[str, str]:
-    """
-    Resolve multiple domains in parallel using requests (which was working) but concurrently
-    
-    Args:
-        domain_urls: List of tuples (name, url) to resolve
-        
-    Returns:
-        Dict mapping original URLs to resolved domains
-    """
-    if not domain_urls:
-        return {}
-    
-    results = {}
-    
-    def resolve_single_domain_sync(name, url):
-        """Synchronous domain resolution using requests (the working approach)"""
-        try:
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-            }
-            resp = requests.get(url, allow_redirects=True, headers=headers, timeout=10)
-            final_url = resp.url
-            domain = urlparse(final_url).netloc
-            results[url] = domain
-            logger.debug(f"✅ Resolved domain for {name}: {domain}")
-            return name, domain
-        except Exception as e:
-            logger.warning(f"⚠️ Failed to resolve domain for {name} ({url}): {str(e)}")
-            results[url] = url  # Fallback to original URL
-            return name, url
-    
-    # Execute all tasks concurrently using ThreadPoolExecutor
-    logger.info(f"🚀 Starting parallel domain resolution for {len(domain_urls)} URLs")
-    start_time = time.time()
-    
-    # Use ThreadPoolExecutor to run requests concurrently
-    loop = asyncio.get_event_loop()
-    with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-        # Create tasks for all domain resolutions
-        tasks = [
-            loop.run_in_executor(executor, resolve_single_domain_sync, name, url)
-            for name, url in domain_urls
-        ]
-        
-        # Execute all tasks concurrently
-        resolved_domains = await asyncio.gather(*tasks, return_exceptions=True)
-        
-        end_time = time.time()
-        logger.info(f"⚡ Parallel domain resolution completed in {end_time - start_time:.2f} seconds")
-        
-        # Process results and handle any exceptions
-        for result in resolved_domains:
-            if isinstance(result, Exception):
-                logger.error(f"❌ Domain resolution error: {result}")
-            else:
-                name, domain = result
-                logger.debug(f"✅ Successfully resolved: {name} -> {domain}")
-    
-    return results
-
-def run_async_task(task_id: str):
-    """Wrapper function to run async tasks in FastAPI background tasks"""
-    try:
-        # Create new event loop for the background task
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(scrape_todays_launches_task(task_id))
-    except Exception as e:
-        logger.error(f"💥 Error in async task {task_id}: {str(e)}")
-        task_status[task_id].status = "failed"
-        task_status[task_id].error_message = str(e)
-        task_status[task_id].completed_at = datetime.now()
-    finally:
-        loop.close()
 
 class Product(BaseModel):
     id: str
@@ -474,8 +462,8 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
         raise e
 
 
-async def scrape_todays_launches_task(task_id: str):
-    """Background task to scrape today's ProductHunt launches with parallel domain resolution"""
+def scrape_todays_launches_task(task_id: str):
+    """Background task to scrape today's ProductHunt launches"""
     
     logger.info(f"🚀 Starting background task {task_id} for today's launches")
     
@@ -484,6 +472,9 @@ async def scrape_todays_launches_task(task_id: str):
         task_status[task_id].status = "running"
         task_status[task_id].created_at = datetime.now()
         logger.info(f"📊 Task {task_id} status set to running")
+        
+        # List to store domains that need resolution
+        domains_to_resolve = []  # Will store tuples of (domain, name, product_data)
         
         homepage_products = []  # Featured products from homepage
         graphql_products = []   # Additional products from GraphQL
@@ -523,10 +514,14 @@ async def scrape_todays_launches_task(task_id: str):
                 if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
                     content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
                     json_content1 = json.loads(content)
+                    if json_content1:
+                        logger.info(f"✅ Task {task_id}: Successfully extracted JSON content from homepage")
+                        # with open('homepage_data.json', 'w') as f:
+                        #     json.dump(json_content1, f)
                     break
             
-            if json_content1 and 'events' in json_content1 and len(json_content1['events']) > 4:
-                event_data = json_content1['events'][4]['value']['data']['homefeed']
+            if json_content1 and 'events' in json_content1 and len(json_content1['events']) >= 1:
+                event_data = json_content1['events'][1]['value']['data']['homefeed']
                 
                 # Get pagination info
                 page_info = event_data.get('pageInfo', {})
@@ -541,10 +536,6 @@ async def scrape_todays_launches_task(task_id: str):
                     products = edges[0]['node']['items']
                     logger.info(f"📋 Task {task_id}: Found {len(products)} products from homepage")
                     
-                    # Collect all domains for parallel resolution
-                    domain_urls = []
-                    product_data_list = []
-                    
                     for product in products:
                         try:
                             # Extract product data with error handling
@@ -558,43 +549,23 @@ async def scrape_todays_launches_task(task_id: str):
                             
                             # Extract short URL
                             short_url = product.get('shortenedUrl')
-                            domain1 = f'https://producthunt.com{short_url}' if short_url else None
-                            
-                            # Store product data for later processing
-                            product_data = {
-                                'name': name,
-                                'slug': slug,
-                                'tagline': tagline,
-                                'thumbnail_image_uuid': thumbnail_image_uuid,
-                                'domain1': domain1,
-                                'product': product
-                            }
-                            product_data_list.append(product_data)
-                            
-                            # Add to domain resolution list if we have a URL
-                            if domain1:
-                                domain_urls.append((name, domain1))
-                                
-                        except Exception as e:
-                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from homepage: {str(e)}")
-                            continue
-                    
-                    # Resolve all domains in parallel
-                    logger.info(f"🚀 Task {task_id}: Starting parallel domain resolution for {len(domain_urls)} URLs")
-                    resolved_domains = await resolve_domains_parallel(domain_urls)
-                    
-                    # Process products with resolved domains
-                    for product_data in product_data_list:
-                        try:
-                            name = product_data['name']
-                            slug = product_data['slug']
-                            tagline = product_data['tagline']
-                            thumbnail_image_uuid = product_data['thumbnail_image_uuid']
-                            domain1 = product_data['domain1']
-                            product = product_data['product']
-                            
-                            # Get resolved domain
-                            domain = resolved_domains.get(domain1, domain1) if domain1 else None
+                            domain = f'https://producthunt.com{short_url}' if short_url else None
+
+                            if domain:
+                                # Store the Product Hunt URL as key for resolution
+                                domains_to_resolve.append((domain, name, {'id': product.get('id'), 'domain': domain}))
+
+                            # headers = {
+                            #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                            # } 
+
+                            # try:
+                            #     resp = requests.get(domain1, allow_redirects=True, headers=headers)
+
+                            #     final_url = resp.url
+                            #     domain = urlparse(final_url).netloc
+                            # except:
+                            #     domain = domain1
                             
                             # Construct product URL
                             url = f'https://producthunt.com/products/{slug}' if slug else None
@@ -629,7 +600,7 @@ async def scrape_todays_launches_task(task_id: str):
                                 slug=slug or '',
                                 tagline=tagline or '',
                                 thumbnail_image_uuid=thumbnail_image_uuid,
-                                domain=domain.replace('www.', ''),
+                                domain=domain.replace('www.', '') if domain else None,
                                 url=url,
                                 daily_rank=daily_rank,
                                 weekly_rank=weekly_rank,
@@ -648,6 +619,7 @@ async def scrape_todays_launches_task(task_id: str):
                         except Exception as e:
                             logger.warning(f"⚠️ Task {task_id}: Failed to extract product from homepage: {str(e)}")
                             continue
+            # logger.info(f"✅ Task {task_id}: Extracted {homepage_products} products from homepage")
             
             # Method 2: GraphQL API call for unfeatured posts (secondary products)
             logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
@@ -683,10 +655,6 @@ async def scrape_todays_launches_task(task_id: str):
                         products = edges[0]['node']['items']
                         logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
                         
-                        # Collect all domains for parallel resolution (GraphQL products)
-                        graphql_domain_urls = []
-                        graphql_product_data_list = []
-                        
                         for product in products:
                             try:
                                 # Extract product data with error handling
@@ -700,46 +668,12 @@ async def scrape_todays_launches_task(task_id: str):
                                 
                                 # Extract short URL
                                 short_url = product.get('shortenedUrl')
-                                domain1 = f'https://producthunt.com{short_url}' if short_url else None
-                                
-                                # Store product data for later processing
-                                product_data = {
-                                    'name': name,
-                                    'slug': slug,
-                                    'tagline': tagline,
-                                    'thumbnail_image_uuid': thumbnail_image_uuid,
-                                    'domain1': domain1,
-                                    'product': product
-                                }
-                                graphql_product_data_list.append(product_data)
-                                
-                                # Add to domain resolution list if we have a URL
-                                if domain1:
-                                    graphql_domain_urls.append((name, domain1))
-                                    
-                            except Exception as e:
-                                logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
-                                continue
-                        
-                        # Resolve all GraphQL domains in parallel
-                        if graphql_domain_urls:
-                            logger.info(f"🚀 Task {task_id}: Starting parallel domain resolution for {len(graphql_domain_urls)} GraphQL URLs")
-                            graphql_resolved_domains = await resolve_domains_parallel(graphql_domain_urls)
-                        else:
-                            graphql_resolved_domains = {}
-                        
-                        # Process GraphQL products with resolved domains
-                        for product_data in graphql_product_data_list:
-                            try:
-                                name = product_data['name']
-                                slug = product_data['slug']
-                                tagline = product_data['tagline']
-                                thumbnail_image_uuid = product_data['thumbnail_image_uuid']
-                                domain1 = product_data['domain1']
-                                product = product_data['product']
-                                
-                                # Get resolved domain
-                                domain = graphql_resolved_domains.get(domain1, domain1) if domain1 else None
+                                domain = f'https://producthunt.com{short_url}' if short_url else None
+
+                                # Store domain for batch resolution
+                                if domain:
+                                    # Store the Product Hunt URL as key for resolution
+                                    domains_to_resolve.append((domain, name, {'id': product.get('id'), 'domain': domain}))
                                 
                                 # Construct product URL
                                 url = f'https://producthunt.com/products/{slug}' if slug else None
@@ -774,7 +708,7 @@ async def scrape_todays_launches_task(task_id: str):
                                     slug=slug or '',
                                     tagline=tagline or '',
                                     thumbnail_image_uuid=thumbnail_image_uuid,
-                                    domain=domain.replace('www.', ''),
+                                    domain=domain.replace('www.', '') if domain else None,
                                     url=url,
                                     daily_rank=daily_rank,
                                     weekly_rank=weekly_rank,
@@ -808,6 +742,42 @@ async def scrape_todays_launches_task(task_id: str):
                     unique_graphql_products.append(product)
                 else:
                     logger.debug(f"⏭️ Task {task_id}: Skipped duplicate GraphQL product {product.name}")
+            
+            # Resolve all domains in batches
+            logger.info(f"🌐 Task {task_id}: Resolving {len(domains_to_resolve)} domains in batches")
+            
+            # Create event loop in the background task
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            resolved_domains = loop.run_until_complete(resolve_domains_batch(domains_to_resolve, task_id))
+            loop.close()
+            
+            # Create new product instances with resolved domains
+            def update_product_domain(product_data):
+                if isinstance(product_data, dict):
+                    # For raw dictionary data
+                    domain = product_data.get('domain')
+                else:
+                    # For existing Product instances
+                    domain = product_data.domain
+
+                # Get the resolved domain if available
+                if domain in resolved_domains:
+                    resolved = resolved_domains[domain]
+                    logger.info(f"🔄 Updating domain for {product_data.name if hasattr(product_data, 'name') else product_data.get('name')}: {domain} -> {resolved}")
+                    
+                    if isinstance(product_data, dict):
+                        product_data['domain'] = resolved
+                        return Product(**product_data)
+                    else:
+                        data = product_data.dict()
+                        data['domain'] = resolved
+                        return Product(**data)
+                return product_data
+
+            # Update domains in both lists
+            homepage_products = [update_product_domain(product) for product in homepage_products]
+            unique_graphql_products = [update_product_domain(product) for product in unique_graphql_products]
             
             # Combine: homepage products first, then unique GraphQL products
             all_products = homepage_products + unique_graphql_products
@@ -1889,22 +1859,26 @@ async def get_todays_launches(
     
     # If no cache, start scraping
     task_id = str(uuid.uuid4())
+    
+    # Initialize task status
     task_status[task_id] = TaskStatus(
         task_id=task_id,
         status="pending",
-        created_at=datetime.now()
+        created_at=datetime.now(),
+        progress=0,
+        total_pages=1,
+        current_page=0
     )
     
-    logger.info(f"🆔 Created task {task_id} for today's launches")
-    
-    # Start background task
-    background_tasks.add_task(run_async_task, task_id)
+    # Start background task immediately
+    background_tasks.add_task(scrape_todays_launches_task, task_id)
     
     logger.info(f"✅ Task {task_id} queued successfully for today's launches")
     
+    # Return immediately with task ID
     return {
         "task_id": task_id, 
-        "message": "Scraping today's launches started", 
+        "message": "Scraping started in background", 
         "status": "pending",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "rank_type": "todays_launches",
