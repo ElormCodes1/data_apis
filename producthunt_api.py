@@ -44,8 +44,10 @@ async def resolve_domain(session: aiohttp.ClientSession, domain: str, name: str,
         async with session.get(url, headers=headers, allow_redirects=True, timeout=10) as response:
             final_url = str(response.url)
             resolved_domain = urlparse(final_url).netloc
-            logger.info(f"✅ Task {task_id}: Resolved domain for {name}: {resolved_domain}")
-            return domain, resolved_domain
+            # Remove www. prefix from resolved domain
+            clean_domain = resolved_domain.replace('www.', '') if resolved_domain else resolved_domain
+            logger.info(f"✅ Task {task_id}: Resolved domain for {name}: {clean_domain}")
+            return domain, clean_domain
     except Exception as e:
         logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain for {name}: {domain}. Error: {str(e)}")
         return domain, domain
@@ -414,6 +416,9 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
         cursor = None
         has_next_page = True
         
+        # List to store domains that need resolution
+        domains_to_resolve = []  # Will store tuples of (domain, name, product_data)
+        
         logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
         driver = setup_chrome_driver()
         
@@ -466,6 +471,11 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
                     if node.get('__typename') == 'Post':  # Skip ads
                         product = extract_product_data(node)
                         all_products.append(product)
+                        
+                        # Collect domain for batch resolution
+                        if product.domain:
+                            domains_to_resolve.append((product.domain, product.name, {'id': product.id, 'domain': product.domain}))
+                        
                         page_products += 1
                         logger.debug(f"✅ Task {task_id}: Extracted product {product.name} (ID: {product.id})")
                     else:
@@ -490,6 +500,30 @@ def scrape_producthunt_data_task(task_id: str, rank_type: str, date: str, max_pa
         finally:
             logger.info(f"🧹 Task {task_id}: Closing Chrome WebDriver")
             driver.quit()
+        
+        # Resolve all domains in batches
+        logger.info(f"🌐 Task {task_id}: Resolving {len(domains_to_resolve)} domains in batches")
+        
+        # Create event loop in the background task
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resolved_domains = loop.run_until_complete(resolve_domains_batch(domains_to_resolve, task_id))
+        loop.close()
+        
+        # Create new product instances with resolved domains
+        def update_product_domain(product_data):
+            if product_data.domain in resolved_domains:
+                resolved = resolved_domains[product_data.domain]
+                logger.info(f"🔄 Updating domain for {product_data.name}: {product_data.domain} -> {resolved}")
+                
+                # Create new Product instance with updated domain
+                data = product_data.dict()
+                data['domain'] = resolved
+                return Product(**data)
+            return product_data
+
+        # Update all products with resolved domains
+        all_products = [update_product_domain(product) for product in all_products]
         
         # Update task status to completed
         task_status[task_id].status = "completed"
@@ -2403,8 +2437,8 @@ async def get_task_result(
                 "start_index": start_index + 1,
                 "end_index": min(end_index, total_items)
             },
-            "scraping_info": {
-                "total_pages_scraped": task.total_pages,
+            "info": {
+                "total_pages": task.total_pages,
                 "has_more_data": result.get("has_next_page", False),
                 "end_cursor": result.get("end_cursor")
             },
