@@ -50,6 +50,34 @@ async def resolve_domain(session: aiohttp.ClientSession, domain: str, name: str,
         logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain for {name}: {domain}. Error: {str(e)}")
         return domain, domain
 
+async def scrape_product_detail_for_domain(session: aiohttp.ClientSession, product_url: str, name: str, task_id: str) -> Tuple[str, str]:
+    """Scrape a product detail page to extract the actual website domain from 'Visit website' button"""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    try:
+        async with session.get(product_url, headers=headers, timeout=15) as response:
+            html_content = await response.text()
+            soup = BeautifulSoup(html_content, 'html.parser')
+            
+            # Look for the "Visit website" button
+            visit_button = soup.find('a', {'data-test': 'visit-website-button'})
+            
+            if visit_button and visit_button.get('href'):
+                website_url = visit_button.get('href')
+                # Extract domain from the URL and remove www. prefix
+                domain = urlparse(website_url).netloc
+                clean_domain = domain.replace('www.', '') if domain else domain
+                logger.info(f"✅ Task {task_id}: Found domain for {name}: {clean_domain} (from {website_url})")
+                return product_url, clean_domain
+            else:
+                logger.warning(f"⚠️ Task {task_id}: No 'Visit website' button found for {name} on {product_url}")
+                return product_url, None
+                
+    except Exception as e:
+        logger.warning(f"⚠️ Task {task_id}: Failed to scrape domain for {name} from {product_url}. Error: {str(e)}")
+        return product_url, None
+
 async def resolve_domains_batch(domains_data: List[Tuple[str, str, str]], task_id: str, batch_size: int = 100) -> Dict[str, str]:
     """Resolve multiple domains concurrently in batches"""
     resolved_domains = {}
@@ -92,6 +120,49 @@ async def resolve_domains_batch(domains_data: List[Tuple[str, str, str]], task_i
                                 logger.warning(f"⚠️ Task {task_id}: Failed to cache domain {original_domain}: {str(e)}")
     
     return resolved_domains
+
+async def scrape_category_product_domains_batch(product_urls_data: List[Tuple[str, str]], task_id: str, batch_size: int = 10) -> Dict[str, str]:
+    """Scrape multiple product detail pages to extract actual website domains"""
+    scraped_domains = {}
+    
+    # If cache is available, check cache first
+    if CACHE_AVAILABLE and cache:
+        for product_url, name in product_urls_data:
+            cached_domain = cache.get(f"category_domain:{product_url}")
+            if cached_domain:
+                scraped_domains[product_url] = cached_domain
+                logger.info(f"🎯 Task {task_id}: Cache hit for product URL: {product_url}")
+                product_urls_data = [d for d in product_urls_data if d[0] != product_url]
+
+    # Only proceed with HTTP requests if there are unresolved domains
+    if product_urls_data:
+        # Configure SSL context to handle certificate verification
+        ssl_context = ssl.create_default_context()
+        ssl_context.check_hostname = False
+        ssl_context.verify_mode = ssl.CERT_NONE
+        
+        connector = aiohttp.TCPConnector(ssl=ssl_context)
+        timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds total timeout
+        
+        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+            for i in range(0, len(product_urls_data), batch_size):
+                batch = product_urls_data[i:i + batch_size]
+                tasks = [scrape_product_detail_for_domain(session, product_url, name, task_id) for product_url, name in batch]
+                results = await asyncio.gather(*tasks, return_exceptions=True)
+                
+                for (product_url, domain) in results:
+                    if isinstance(domain, Exception):
+                        scraped_domains[product_url] = None
+                    else:
+                        scraped_domains[product_url] = domain
+                        # Cache the result if cache is available
+                        if CACHE_AVAILABLE and cache and domain:
+                            try:
+                                cache.set(f"category_domain:{product_url}", domain, expire=86400)  # Cache for 24 hours
+                            except Exception as e:
+                                logger.warning(f"⚠️ Task {task_id}: Failed to cache domain {product_url}: {str(e)}")
+    
+    return scraped_domains
 
 # Configure logging
 logging.basicConfig(
@@ -1233,6 +1304,9 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
         has_next_page = True
         cursor = None
         
+        # List to store product URLs for domain scraping
+        product_urls_to_scrape = []  # Will store tuples of (product_url, name)
+        
         logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
         driver = setup_chrome_driver()
         
@@ -1291,6 +1365,9 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
                     product_data = extract_category_product_data(product['node'])
                     if product_data:
                         all_products.append(product_data)
+                        # Collect product URL for domain scraping
+                        if product_data.url:
+                            product_urls_to_scrape.append((product_data.url, product_data.name))
                         logger.info(f"✅ Extracted product: {product_data.name}")
                 except Exception as e:
                     logger.error(f"❌ Error extracting product data: {str(e)}")
@@ -1335,6 +1412,9 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
                         product_data = extract_category_product_data(product['node'])
                         if product_data:
                             all_products.append(product_data)
+                            # Collect product URL for domain scraping
+                            if product_data.url:
+                                product_urls_to_scrape.append((product_data.url, product_data.name))
                             logger.info(f"✅ Extracted product: {product_data.name}")
                     except Exception as e:
                         logger.error(f"❌ Error extracting product data: {str(e)}")
@@ -1356,7 +1436,31 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
             driver.quit()
             logger.info("🔧 Chrome WebDriver closed")
         
-        # Store results
+        # Scrape actual domains from product detail pages
+        logger.info(f"🌐 Task {task_id}: Scraping domains from {len(product_urls_to_scrape)} product detail pages")
+        
+        # Create event loop in the background task
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        scraped_domains = loop.run_until_complete(scrape_category_product_domains_batch(product_urls_to_scrape, task_id))
+        loop.close()
+        
+        # Update product instances with scraped domains
+        def update_category_product_domain(product_data):
+            if product_data.url in scraped_domains and scraped_domains[product_data.url]:
+                resolved_domain = scraped_domains[product_data.url]
+                logger.info(f"🔄 Updating domain for {product_data.name}: {product_data.domain} -> {resolved_domain}")
+                
+                # Create new CategoryProduct instance with updated domain
+                data = product_data.dict()
+                data['domain'] = resolved_domain
+                return CategoryProduct(**data)
+            return product_data
+        
+        # Update all products with scraped domains
+        all_products = [update_category_product_domain(product) for product in all_products]
+        
+        # Store results with updated domains
         result_data = {
             "products": [product.dict() for product in all_products],
             "total_products": len(all_products),
