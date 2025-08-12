@@ -1654,7 +1654,6 @@ async def get_daily_rankings(
     
     return {
         "task_id": task_id, 
-        "message": "Scraping started", 
         "status": "pending",
         "date": date,
         "rank_type": "daily",
@@ -1735,7 +1734,6 @@ async def get_weekly_rankings(
     
     return {
         "task_id": task_id, 
-        "message": "Scraping started", 
         "status": "pending",
         "date": date,
         "rank_type": "weekly",
@@ -1816,7 +1814,6 @@ async def get_monthly_rankings(
     
     return {
         "task_id": task_id, 
-        "message": "Scraping started", 
         "status": "pending",
         "date": date,
         "rank_type": "monthly",
@@ -1896,7 +1893,6 @@ async def get_yearly_rankings(
     
     return {
         "task_id": task_id, 
-        "message": "Scraping started", 
         "status": "pending",
         "date": date,
         "rank_type": "yearly",
@@ -1981,8 +1977,7 @@ async def get_todays_launches(
     
     # Return immediately with task ID
     return {
-        "task_id": task_id, 
-        "message": "Scraping started in background", 
+        "task_id": task_id,
         "status": "pending",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "rank_type": "todays_launches",
@@ -2064,8 +2059,7 @@ async def get_upcoming_launches(
     logger.info(f"✅ Task {task_id} queued successfully for upcoming launches")
     
     return {
-        "task_id": task_id, 
-        "message": "Scraping upcoming launches started", 
+        "task_id": task_id,
         "status": "pending",
         "date": datetime.now().strftime("%Y-%m-%d"),
         "rank_type": "upcoming_launches",
@@ -2074,8 +2068,8 @@ async def get_upcoming_launches(
 
 
 @router.get("/categories")
-async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
-    """Get ProductHunt categories"""
+async def get_categories():
+    """Get ProductHunt categories (synchronous response)"""
     
     logger.info(f"📥 Received GET request for categories")
     
@@ -2085,37 +2079,133 @@ async def get_categories(background_tasks: BackgroundTasks = BackgroundTasks()):
         if cached_data:
             logger.info("✅ Returning cached data for categories")
             return {
-                "message": "Cached data retrieved successfully",
                 "status": "completed",
                 "date": datetime.now().strftime("%Y-%m-%d"),
                 "rank_type": "categories",
                 "cached": True,
-                "data": cached_data
+                "categories": cached_data.get("categories", []),
+                "total_categories": cached_data.get("total_categories", 0)
             }
     
-    # If no cache, start scraping
-    task_id = str(uuid.uuid4())
-    task_status[task_id] = TaskStatus(
-        task_id=task_id,
-        status="pending",
-        created_at=datetime.now()
-    )
+    # If no cache, scrape categories directly
+    logger.info("🚀 Starting direct category scraping")
     
-    logger.info(f"🆔 Created task {task_id} for categories")
-    
-    # Start background task
-    background_tasks.add_task(scrape_categories_task, task_id)
-    
-    logger.info(f"✅ Task {task_id} queued successfully for categories")
-    
-    return {
-        "task_id": task_id, 
-        "message": "Scraping categories started", 
-        "status": "pending",
-        "date": datetime.now().strftime("%Y-%m-%d"),
-        "rank_type": "categories",
-        "status_url": f"/producthunt/status/{task_id}"
-    }
+    try:
+        logger.info("🔧 Initializing Chrome WebDriver for categories")
+        driver = setup_chrome_driver()
+        
+        try:
+            # Make GraphQL API call for categories
+            logger.info("📡 Fetching ProductHunt categories via GraphQL API")
+            
+            params = {
+                'operationName': 'HeaderDesktopProductsNavigationQuery',
+                'variables': '{}',
+                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"fd37cb954d265af3f43315fe547c112ca5e1c8e0ef70d1cec6b1601f01c7aa08"}}',
+            }
+            
+            base_url = 'https://www.producthunt.com/frontend/graphql'
+            url = base_url + '?' + urlencode(params)
+            
+            driver.get(url)
+            
+            # Wait for page to load
+            logger.info("⏳ Waiting for GraphQL response...")
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.TAG_NAME, "pre"))
+            )
+            
+            # Parse response
+            soup = BeautifulSoup(driver.page_source, 'html.parser')
+            pre_content = soup.find('pre')
+            
+            if not pre_content:
+                raise Exception("Could not find pre content in response")
+            
+            json_data = json.loads(pre_content.get_text())
+            logger.info("📊 Successfully parsed GraphQL response")
+            
+            # Extract categories
+            category_list = []
+            product_categories = json_data.get('data', {}).get('productCategories', {}).get('edges', [])
+            
+            logger.info(f"📋 Found {len(product_categories)} main categories")
+            
+            for category in product_categories:
+                try:
+                    # Extract major category first
+                    major_category_node = category['node']
+                    major_url_path = major_category_node['path']
+                    major_slug = major_url_path.split('/')[-1] if major_url_path else ""
+                    
+                    major_category_data = ProductHuntCategory(
+                        name=major_category_node['name'],
+                        url="https://producthunt.com" + major_category_node['path'],
+                        id=major_category_node['id'],
+                        slug=major_slug
+                    )
+                    category_list.append(major_category_data)
+                    logger.info(f"✅ Extracted major category: {major_category_data.name} (slug: {major_slug})")
+                    
+                    # Extract subcategories
+                    sub_categories = major_category_node['subCategories']['nodes']
+                    logger.info(f"📂 Processing subcategories for: {major_category_node.get('name', 'Unknown')} with {len(sub_categories)} subcategories")
+                    
+                    for sub_category in sub_categories:
+                        try:
+                            # Extract slug from URL path
+                            url_path = sub_category['path']
+                            slug = url_path.split('/')[-1] if url_path else ""
+                            
+                            category_data = ProductHuntCategory(
+                                name=sub_category['name'],
+                                url="https://producthunt.com" + sub_category['path'],
+                                id=sub_category['id'],
+                                slug=slug
+                            )
+                            category_list.append(category_data)
+                            logger.info(f"✅ Extracted subcategory: {category_data.name} (slug: {slug})")
+                        except Exception as e:
+                            logger.error(f"❌ Error extracting subcategory data: {str(e)}")
+                            continue
+                            
+                except Exception as e:
+                    logger.error(f"❌ Error processing category: {str(e)}")
+                    continue
+            
+            logger.info(f"📊 Successfully extracted {len(category_list)} categories")
+            
+            # Prepare result data
+            result_data = {
+                "categories": [category.dict() for category in category_list],
+                "total_categories": len(category_list),
+                "scraped_at": datetime.now().isoformat()
+            }
+            
+            # Cache the results
+            if CACHE_AVAILABLE and cache:
+                cache.set("categories", result_data)
+                logger.info("💾 Cached categories data")
+            
+            logger.info(f"✅ Completed successfully with {len(category_list)} categories")
+            
+            return {
+                "status": "completed",
+                "date": datetime.now().strftime("%Y-%m-%d"),
+                "rank_type": "categories",
+                "cached": False,
+                "categories": result_data["categories"],
+                "total_categories": result_data["total_categories"]
+            }
+            
+        finally:
+            driver.quit()
+            logger.info("🔧 Chrome WebDriver closed")
+            
+    except Exception as e:
+        logger.error(f"💥 Categories scraping failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to scrape categories: {str(e)}")
 
 
 @router.get("/category_products")
@@ -2204,8 +2294,7 @@ async def get_category_products(
     logger.info(f"✅ Task {task_id} queued successfully for category products")
     
     return {
-        "task_id": task_id, 
-        "message": "Scraping category products started", 
+        "task_id": task_id,
         "status": "pending",
         "category_slug": category_slug,
         "order": order,
