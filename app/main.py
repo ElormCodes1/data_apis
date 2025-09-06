@@ -16,6 +16,7 @@ from gmaps_api import router as gmaps_router
 from chrome_webstore_api import router as chrome_webstore_router
 from twitter_api import router as twitter_router
 from producthunt_api import router as producthunt_router
+from amazon_search_api import router as amazon_router
 
 # Configure logging
 logging.basicConfig(
@@ -47,6 +48,7 @@ app.include_router(gmaps_router, prefix="/gmaps", tags=["Google Maps"])
 app.include_router(chrome_webstore_router, prefix="/chrome-webstore", tags=["Chrome Web Store"])
 app.include_router(twitter_router, prefix="/twitter", tags=["Twitter"])
 app.include_router(producthunt_router, prefix="/producthunt", tags=["ProductHunt"])
+app.include_router(amazon_router, prefix="/amazon-search", tags=["Amazon"])
 
 # Health check endpoint
 @app.get("/")
@@ -61,6 +63,7 @@ async def root():
             "/chrome-webstore - Chrome Web Store Extensions Scraper",
             "/twitter - Twitter Data Scraper",
             "/producthunt - ProductHunt Rankings Scraper",
+            "/amazon-search - Amazon Product Search Scraper",
             "/docs - API Documentation",
             "/health - Health Check"
         ]
