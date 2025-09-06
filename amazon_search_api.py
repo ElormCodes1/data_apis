@@ -121,82 +121,36 @@ class AmazonScraper:
         self.wait = None
         
     def _init_webdriver(self):
-        """Initialize WebDriver only when needed"""
+        """Initialize WebDriver only when needed - using same config as other APIs"""
         if self.driver is not None:
             return
             
-        # Setup webdriver
+        # Setup webdriver using same configuration as gmaps_api and chrome_webstore_api
         options = webdriver.ChromeOptions()
-        # Block notifications
-        options.add_argument('--disable-notifications')
-        # Block popups
-        options.add_argument('--disable-popup-blocking')
-        # Block cookie warnings
-        options.add_argument('--disable-infobars')
-        # Set language to English
-        options.add_argument('--lang=en-US')
-        # Set location to US
-        options.add_argument('--geolocation=US')
-        options.add_argument('--accept-lang=en-US,en;q=0.9')
-        # Disable location services
-        options.add_argument('--disable-location-services')
-        # Disable geolocation
-        options.add_argument('--disable-geolocation')
-        # Set timezone
-        options.add_argument('--timezone=America/New_York')
-        # Disable save password prompts
-        prefs = {
-            "credentials_enable_service": False,
-            "profile.password_manager_enabled": False,
-            # Disable location prompts
-            "profile.default_content_setting_values.geolocation": 2,
-            # Disable translation prompts
-            "translate_whitelists": {},
-            "translate.enabled": False,
-            # Block third-party cookies
-            "profile.block_third_party_cookies": True,
-            # Disable 'Chrome is being controlled by automated software' banner
-            "useAutomationExtension": False,
-            # Accept cookies by default to avoid cookie prompts
-            "profile.default_content_settings.cookies": 1,
-            "profile.default_content_setting_values.cookies": 1,
-            # Disable all permission prompts
-            "profile.default_content_setting_values.notifications": 2,
-            "profile.default_content_setting_values.media_stream_mic": 2,
-            "profile.default_content_setting_values.media_stream_camera": 2,
-            "profile.default_content_setting_values.protocol_handlers": 2,
-            # Set default location to US
-            "profile.default_content_setting_values.geolocation": 1,
-            "profile.default_content_settings.geolocation": 1,
-            # Set timezone
-            "profile.default_content_setting_values.timezone": 1,
-            "profile.default_content_settings.timezone": 1,
-        }
-        options.add_experimental_option("prefs", prefs)
-        options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        # Add additional arguments for stability and speed
-        options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
-        options.add_argument('--disable-gpu')
-        options.add_argument('--disable-extensions')
-        options.add_argument('--disable-plugins')
-        options.add_argument('--disable-images')
-        options.add_argument('--disable-css')
-        options.add_argument('--disable-web-security')
-        options.add_argument('--disable-features=VizDisplayCompositor')
-        options.add_argument('--disable-background-timer-throttling')
-        options.add_argument('--disable-backgrounding-occluded-windows')
-        options.add_argument('--disable-renderer-backgrounding')
-        options.add_argument('--aggressive-cache-discard')
-        options.add_argument('--memory-pressure-off')
-        # Set a custom user agent to avoid detection
-        options.add_argument('--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36')
-        options.add_argument('--ignore-certificate-errors')
-        options.add_argument('--incognito')
         
-        # Add headless mode for speed
+        # Use exact same Chrome arguments as other APIs
+        chrome_args = [
+            "disable-cookies",
+            "disable-extensions", 
+            "disable-gpu",
+            "disable-infobars",
+            "disable-notifications",
+            "disable-popup-blocking",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+            "--disable-web-security",
+            "--disable-features=VizDisplayCompositor",
+            "--disable-ipc-flooding-protection",
+            "user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "--remote-debugging-pipe"
+        ]
+        
+        for arg in chrome_args:
+            options.add_argument(arg)
+        
+        # Add headless mode if configured
         if CONFIG['headless_mode']:
-            options.add_argument('--headless')
+            options.add_argument("--headless")
         
         self.driver = webdriver.Chrome(options=options)
         self.wait = WebDriverWait(self.driver, CONFIG['explicit_wait'])
