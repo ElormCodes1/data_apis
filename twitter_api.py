@@ -5,13 +5,19 @@ FastAPI router for Twitter data scraping functionality.
 Includes profile information, followers, following, posts, and search capabilities.
 """
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, BackgroundTasks
 from fastapi.responses import JSONResponse
 import requests
 import json
 from bs4 import BeautifulSoup
 import logging
 import time
+import uuid
+import asyncio
+from datetime import datetime
+from typing import Dict, Any, List
+from pydantic import BaseModel, Field
+from concurrent.futures import ThreadPoolExecutor
 
 
 # Configure logging
@@ -23,6 +29,23 @@ logger = logging.getLogger(__name__)
 
 # Create router instead of app
 router = APIRouter()
+
+# In-memory storage for background tasks
+tasks: Dict[str, Dict[str, Any]] = {}
+
+# Pydantic models for task management
+class ListMembersStatus(BaseModel):
+    """List members task status model"""
+    task_id: str
+    status: str  # "pending", "running", "completed", "failed"
+    progress: int  # 0-100
+    message: str
+    list_id: str
+    total_members: int = 0
+    pages_processed: int = 0
+    current_page: int = 0
+    last_updated: str
+    results: List[Dict[str, Any]] = []  # Store the extracted members
 
 # @router.get("/")
 # async def root():
@@ -2901,4 +2924,467 @@ async def search_people(
         "has_more": next_cursor is not None,
         "total_results": len(account_res)
     }
+
+def extract_list_id(list_identifier: str) -> str:
+    """
+    Extract list ID from Twitter list URL or return the ID if already provided.
+    
+    Args:
+        list_identifier: Either a list ID or a Twitter list URL
+        
+    Returns:
+        The extracted list ID or None if invalid
+    """
+    import re
+    
+    # If it's already just a numeric ID, return it
+    if list_identifier.isdigit():
+        return list_identifier
+    
+    # Extract ID from various Twitter list URL formats
+    patterns = [
+        r'x\.com/i/lists/(\d+)',  # https://x.com/i/lists/123456789/members
+        r'twitter\.com/i/lists/(\d+)',  # https://twitter.com/i/lists/123456789/members
+        r'x\.com/i/lists/(\d+)/members',  # https://x.com/i/lists/123456789/members
+        r'twitter\.com/i/lists/(\d+)/members',  # https://twitter.com/i/lists/123456789/members
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, list_identifier)
+        if match:
+            return match.group(1)
+    
+    return None
+
+@router.get("/list_members")
+async def get_list_members(
+    background_tasks: BackgroundTasks,
+    list_identifier: str = Query(..., description="Twitter list ID or URL (e.g., '123456789' or 'https://x.com/i/lists/123456789/members')")
+):
+    """
+    Start a background task to fetch all members from a Twitter list.
+    
+    This endpoint starts a background task that fetches all members from a specified Twitter list 
+    with detailed user information including profile stats, verification status, and engagement metrics.
+    
+    **Accepts either:**
+    - **List ID**: `"1052973537944694784"`
+    - **List URL**: `"https://x.com/i/lists/1052973537944694784/members"`
+    - **List URL**: `"https://twitter.com/i/lists/1052973537944694784/members"`
+    
+    The endpoint automatically extracts the list ID from URLs if provided.
+    Fetches 500 members per request for optimal performance.
+    
+    Returns a task ID that can be used to check status and get results.
+    """
+    try:
+        # Extract list ID from URL or use provided ID
+        list_id = extract_list_id(list_identifier)
+        if not list_id:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid list identifier. Please provide a valid list ID or URL."
+            )
+        
+        # Generate unique task ID
+        task_id = str(uuid.uuid4())
+        
+        # Create task status
+        tasks[task_id] = ListMembersStatus(
+            task_id=task_id,
+            status="pending",
+            progress=0,
+            message=f"Queued list members extraction for list: {list_id}",
+            list_id=list_id,
+            total_members=0,
+            pages_processed=0,
+            current_page=0,
+            last_updated=datetime.now().isoformat()
+        )
+        
+        # Add background task (fixed count of 500)
+        background_tasks.add_task(extract_list_members_task, task_id, list_id)
+        
+        # Return immediately
+        return {
+            "task_id": task_id,
+            "status": "pending",
+            "message": "List members extraction task queued successfully",
+            "list_id": list_id,
+            "count_per_page": 500,
+            "status_url": f"/twitter/status/{task_id}",
+            "results_url": f"/twitter/results/{task_id}"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error starting list members task: {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Internal server error: {str(e)}"
+        )
+
+def extract_list_members_sync(task_id: str, list_id: str):
+    """Synchronous function to extract list members (runs in thread pool)"""
+    try:
+        # Update task status to running
+        tasks[task_id].status = "running"
+        tasks[task_id].message = "Starting list members extraction..."
+        tasks[task_id].last_updated = datetime.now().isoformat()
+        
+        logger.info(f"Starting list members extraction for task {task_id}, list {list_id}")
+        
+        # Twitter API cookies and headers
+        cookies = {
+            'lang': 'en',
+            'd_prefs': 'MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw',
+            '__cuid': '0641e7de0ab64a19964c03df938b0571',
+            'guest_id': 'v1%3A175743256753373750',
+            'guest_id_marketing': 'v1%3A175743256753373750',
+            'guest_id_ads': 'v1%3A175743256753373750',
+            'personalization_id': '"v1_bwkKlUxg9tTwgq7OVjylwg=="',
+            'kdt': 'qEbFPOJ1tsbEt2w4Qo69kLrJ0e9eAgRP7kEAbNo4',
+            'auth_token': '69248fd51827479cdd467e9921fa2281238eb37b',
+            'ct0': '19e5b5f5430e77535fdc6a16d603ec712318f480c3dcfcae5da2bc912ba01f3396fff23ed660e3a456391cecfad3787a60ac9e1090195e463ea5c51d7e1bdb4c5146083c41370b7effb0c9ef99d804d3',
+            'twid': 'u%3D897727759358853123',
+            '__cf_bm': '_.X5raIz8cSu_xzDM26HM4.6Sl5AC88u7CKv0czHp70-1757787375-1.0.1.1-Z518cqh5qZNAhUWv_jUOADYIJIooPbKsTNX2xx628l48c6uzvzxJkKjZH3tov90Z_shmSpGeClFFHK9arJrVPjZJQNIlytcWyijr0z5wCFo',
+        }
+
+        headers = {
+            'accept': '*/*',
+            'accept-language': 'en-US,en;q=0.7',
+            'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+            'content-type': 'application/json',
+            'priority': 'u=1, i',
+            'referer': f'https://x.com/i/lists/{list_id}/members',
+            'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-origin',
+            'sec-gpc': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+            'x-client-transaction-id': '4rEs7KQ6g9HoXaqekLjl41TdzrOqseFIWPzo701ijxlj9L+wSffo473+Wya1YBC5cKewlOaMqtR/YyySEeXBkidN5e774Q',
+            'x-csrf-token': '19e5b5f5430e77535fdc6a16d603ec712318f480c3dcfcae5da2bc912ba01f3396fff23ed660e3a456391cecfad3787a60ac9e1090195e463ea5c51d7e1bdb4c5146083c41370b7effb0c9ef99d804d3',
+            'x-twitter-active-user': 'yes',
+            'x-twitter-auth-type': 'OAuth2Session',
+            'x-twitter-client-language': 'en',
+            'x-xp-forwarded-for': '7d5392235ff6128773514b9278153067fbd7a0dcd687a00e98b2705522b0dfc3baf295c7ea652a8f56aa4aea37da4d070fa46eb6025cf57356eafb3545ed075eda55cf927a89e28bc061e444c198a1639f515325c1b6827d149e49ffcbd17cc893e7a2177615a176ac1b2b46298858109946a13bf40bb2e10cc6872e538e99babdd331309bfec5000468f5bd919c3649fbb50935d5f2a28ce92fde3fa1d6038faeb6b661e96521a564cda0c34cf336b85a1731f10e3811fd4e6f689a677cbaacf36800ce2d8fd3d11db707ed89c1de674332a52e63665f089c423c475accd09ee8f9a32efe3535d8d520fb15b86aae6510852104fc2a22d5fda0926b59a8944b04',
+        }
+
+        # Initial request parameters (fixed count of 500)
+        params = {
+            'variables': json.dumps({"listId": list_id, "count": 500}),
+            'features': '{"rweb_video_screen_enabled":false,"payments_enabled":false,"profile_label_improvements_pcf_label_in_post_enabled":true,"rweb_tipjar_consumption_enabled":true,"verified_phone_label_enabled":false,"creator_subscriptions_tweet_preview_api_enabled":true,"responsive_web_graphql_timeline_navigation_enabled":true,"responsive_web_graphql_skip_user_profile_image_extensions_enabled":false,"premium_content_api_read_enabled":false,"communities_web_enable_tweet_community_results_fetch":true,"c9s_tweet_anatomy_moderator_badge_enabled":true,"responsive_web_grok_analyze_button_fetch_trends_enabled":false,"responsive_web_grok_analyze_post_followups_enabled":true,"responsive_web_jetfuel_frame":true,"responsive_web_grok_share_attachment_enabled":true,"articles_preview_enabled":true,"responsive_web_edit_tweet_api_enabled":true,"graphql_is_translatable_rweb_tweet_is_translatable_enabled":true,"view_counts_everywhere_api_enabled":true,"longform_notetweets_consumption_enabled":true,"responsive_web_twitter_article_tweet_consumption_enabled":true,"tweet_awards_web_tipping_enabled":false,"responsive_web_grok_show_grok_translated_post":true,"responsive_web_grok_analysis_button_from_backend":true,"creator_subscriptions_quote_tweet_preview_enabled":false,"freedom_of_speech_not_reach_fetch_enabled":true,"standardized_nudges_misinfo":true,"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled":true,"longform_notetweets_rich_text_read_enabled":true,"longform_notetweets_inline_media_enabled":true,"responsive_web_grok_image_annotation_enabled":true,"responsive_web_grok_imagine_annotation_enabled":true,"responsive_web_grok_community_note_auto_translation_is_enabled":false,"responsive_web_enhance_cards_enabled":false}',
+        }
+
+        # Make initial request
+        response = requests.get(
+            'https://x.com/i/api/graphql/DBsxqYmf80LvtzMsmWYTKA/ListMembers',
+            params=params,
+            cookies=cookies,
+            headers=headers,
+        )
+
+        if response.status_code != 200:
+            tasks[task_id].status = "failed"
+            tasks[task_id].message = f"Failed to fetch list members. Twitter API returned status {response.status_code}"
+            tasks[task_id].last_updated = datetime.now().isoformat()
+            return
+
+        # Extract initial members
+        response_data = response.json()
+        all_members = extract_user_info(response_data)
+        
+        # Update task with first page results
+        tasks[task_id].total_members = len(all_members)
+        tasks[task_id].pages_processed = 1
+        tasks[task_id].current_page = 1
+        tasks[task_id].progress = 10
+        tasks[task_id].message = f"Fetched {len(all_members)} members from first page"
+        tasks[task_id].last_updated = datetime.now().isoformat()
+        
+        # Store results in task
+        tasks[task_id].results = all_members
+        
+        # If no members found on first page, mark as completed
+        if len(all_members) == 0:
+            tasks[task_id].status = "completed"
+            tasks[task_id].message = "No members found in the list. The list might be empty, private, or not accessible."
+            tasks[task_id].last_updated = datetime.now().isoformat()
+            return
+        
+        # Handle pagination - exactly like the original script
+        final = False
+        request_count = 0
+        
+        while True:
+            try:
+                try:
+                    cursor = response.json()['data']['list']['members_timeline']['timeline']['instructions'][2]['entries'][-2]['content']['value']
+                except:
+                    cursor = response.json()['data']['list']['members_timeline']['timeline']['instructions'][0]['entries'][-2]['content']['value']
+            except:
+                final = True
+                break
+            
+            # Update parameters with cursor (fixed count of 500)
+            params['variables'] = json.dumps({"listId": list_id, "count": 500, "cursor": cursor})
+            
+            # Make next request
+            response = requests.get(
+                'https://x.com/i/api/graphql/DBsxqYmf80LvtzMsmWYTKA/ListMembers',
+                params=params,
+                cookies=cookies,
+                headers=headers,
+            )
+            
+            if response.status_code != 200:
+                logger.warning(f"Failed to fetch page {request_count + 2}: {response.status_code}")
+                break
+            
+            # Extract members from this page
+            page_members = extract_user_info(response.json())
+            all_members.extend(page_members)
+            request_count += 1
+            
+            # Update task progress
+            tasks[task_id].total_members = len(all_members)
+            tasks[task_id].pages_processed = request_count + 1
+            tasks[task_id].current_page = request_count + 1
+            tasks[task_id].progress = min(90, 10 + (request_count * 5))  # Progress up to 90%
+            tasks[task_id].message = f"Fetched {len(page_members)} members from page {request_count + 1}. Total: {len(all_members)}"
+            tasks[task_id].results = all_members
+            tasks[task_id].last_updated = datetime.now().isoformat()
+            
+            # Small delay to avoid rate limiting
+            time.sleep(0.5)
+            
+            if final:
+                break
+        
+        # Mark task as completed
+        tasks[task_id].status = "completed"
+        tasks[task_id].progress = 100
+        tasks[task_id].message = f"Successfully extracted {len(all_members)} members from list {list_id} across {request_count + 1} pages"
+        tasks[task_id].last_updated = datetime.now().isoformat()
+        
+        logger.info(f"✅ Task {task_id} completed: {len(all_members)} members extracted")
+        
+    except Exception as e:
+        logger.error(f"Error in background task {task_id}: {str(e)}")
+        tasks[task_id].status = "failed"
+        tasks[task_id].message = f"Task failed: {str(e)}"
+        tasks[task_id].last_updated = datetime.now().isoformat()
+
+async def extract_list_members_task(task_id: str, list_id: str):
+    """Async wrapper for the background task"""
+    loop = asyncio.get_event_loop()
+    with ThreadPoolExecutor() as executor:
+        await loop.run_in_executor(executor, extract_list_members_sync, task_id, list_id)
+
+@router.get("/status/{task_id}")
+async def get_twitter_task_status(task_id: str):
+    """Get the status of any Twitter background task"""
+    if task_id not in tasks:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not found"
+        )
+    
+    return tasks[task_id]
+
+@router.get("/results/{task_id}")
+async def get_twitter_task_results(
+    task_id: str,
+    page: int = Query(1, description="Page number", ge=1),
+    per_page: int = Query(50, description="Items per page", ge=1, le=100)
+):
+    """Get paginated results of any completed Twitter background task"""
+    if task_id not in tasks:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Task {task_id} not found"
+        )
+    
+    task = tasks[task_id]
+    
+    if task.status != "completed":
+        raise HTTPException(
+            status_code=400,
+            detail=f"Task {task_id} is not completed yet. Status: {task.status}"
+        )
+    
+    # Get results from task
+    all_results = getattr(task, 'results', [])
+    
+    # Calculate pagination
+    total_items = len(all_results)
+    total_pages = (total_items + per_page - 1) // per_page
+    start_idx = (page - 1) * per_page
+    end_idx = start_idx + per_page
+    
+    # Get page items
+    page_results = all_results[start_idx:end_idx]
+    
+    # Determine result type based on task type
+    result_type = "members" if hasattr(task, 'list_id') else "items"
+    result_key = "members" if hasattr(task, 'list_id') else "items"
+    
+    response = {
+        "task_id": task_id,
+        "total_items": total_items,
+        "total_pages": total_pages,
+        "current_page": page,
+        "per_page": per_page,
+        result_key: page_results,
+        "pagination": {
+            "has_next": page < total_pages,
+            "has_prev": page > 1,
+            "next_page": page + 1 if page < total_pages else None,
+            "prev_page": page - 1 if page > 1 else None
+        }
+    }
+    
+    # Add specific fields based on task type
+    if hasattr(task, 'list_id'):
+        response["list_id"] = task.list_id
+        response["total_members"] = total_items
+    
+    return response
+
+def extract_user_info(twitter_data):
+    """
+    Extract important user information from Twitter list JSON data.
+    
+    Args:
+        twitter_data: The JSON data from Twitter API
+        
+    Returns:
+        List of dictionaries containing user information
+    """
+    users = []
+    
+    try:
+        # Navigate to the entries in the JSON structure
+        try:
+            entries = twitter_data['data']['list']['members_timeline']['timeline']['instructions'][0]['entries']
+            logger.info(f"Found entries in instructions[0], count: {len(entries)}")
+        except:
+            try:
+                entries = twitter_data['data']['list']['members_timeline']['timeline']['instructions'][2]['entries']
+                logger.info(f"Found entries in instructions[2], count: {len(entries)}")
+            except:
+                try:
+                    entries = twitter_data['data']['list']['members_timeline']['timeline']['instructions'][1]['entries']
+                    logger.info(f"Found entries in instructions[1], count: {len(entries)}")
+                except:
+                    logger.warning("No entries found in any instructions")
+                    return []
+                
+        for entry in entries:
+            if entry.get('content', {}).get('entryType') == 'TimelineTimelineItem':
+                user_data = entry['content']['itemContent']['user_results']['result']
+                
+                # Extract basic information
+                user_info = {
+                    'user_id': user_data.get('rest_id'),
+                    'username': user_data.get('core', {}).get('screen_name'),
+                    'display_name': user_data.get('core', {}).get('name'),
+                    'created_at': user_data.get('core', {}).get('created_at'),
+                    'profile_image': user_data.get('avatar', {}).get('image_url'),
+                    'description': user_data.get('legacy', {}).get('description', ''),
+                    'location': user_data.get('location', {}).get('location', ''),
+                    'website_url': user_data.get('legacy', {}).get('url', ''),
+                    
+                    # Statistics
+                    'followers_count': user_data.get('legacy', {}).get('followers_count', 0),
+                    'following_count': user_data.get('legacy', {}).get('friends_count', 0),
+                    'tweets_count': user_data.get('legacy', {}).get('statuses_count', 0),
+                    'likes_count': user_data.get('legacy', {}).get('favourites_count', 0),
+                    'listed_count': user_data.get('legacy', {}).get('listed_count', 0),
+                    'media_count': user_data.get('legacy', {}).get('media_count', 0),
+                    
+                    # Verification and status
+                    'verified': user_data.get('verification', {}).get('verified', False),
+                    'blue_verified': user_data.get('is_blue_verified', False),
+                    'protected': user_data.get('privacy', {}).get('protected', False),
+                    'has_graduated_access': user_data.get('has_graduated_access', False),
+                    
+                    # Profile settings
+                    'default_profile': user_data.get('legacy', {}).get('default_profile', True),
+                    'default_profile_image': user_data.get('legacy', {}).get('default_profile_image', True),
+                    'profile_image_shape': user_data.get('profile_image_shape', 'Circle'),
+                    
+                    # DM permissions
+                    'can_dm': user_data.get('dm_permissions', {}).get('can_dm', False),
+                    'can_dm_on_xchat': user_data.get('dm_permissions', {}).get('can_dm_on_xchat', False),
+                    
+                    # Media permissions
+                    'can_media_tag': user_data.get('media_permissions', {}).get('can_media_tag', False),
+                    
+                    # Relationship info
+                    'following_me': user_data.get('relationship_perspectives', {}).get('following', False),
+                    
+                    # Additional info
+                    'is_translator': user_data.get('legacy', {}).get('is_translator', False),
+                    'has_custom_timelines': user_data.get('legacy', {}).get('has_custom_timelines', False),
+                    'want_retweets': user_data.get('legacy', {}).get('want_retweets', True),
+                    'possibly_sensitive': user_data.get('legacy', {}).get('possibly_sensitive', False),
+                    
+                    # Pinned tweets
+                    'pinned_tweet_ids': user_data.get('legacy', {}).get('pinned_tweet_ids_str', []),
+                    
+                    # Profile interstitial type
+                    'profile_interstitial_type': user_data.get('legacy', {}).get('profile_interstitial_type', ''),
+                    
+                    # Withheld countries
+                    'withheld_in_countries': user_data.get('legacy', {}).get('withheld_in_countries', []),
+                }
+                
+                # Add calculated fields
+                user_info['account_age_days'] = calculate_account_age(user_info['created_at'])
+                user_info['engagement_ratio'] = calculate_engagement_ratio(
+                    user_info['followers_count'], 
+                    user_info['following_count']
+                )
+                user_info['tweet_frequency'] = calculate_tweet_frequency(
+                    user_info['tweets_count'], 
+                    user_info['account_age_days']
+                )
+                
+                users.append(user_info)
+                
+    except (KeyError, TypeError) as e:
+        logger.error(f"Error extracting user data: {e}")
+        return []
+    
+    return users
+
+def calculate_account_age(created_at):
+    """Calculate account age in days."""
+    if not created_at:
+        return 0
+    
+    try:
+        # Parse Twitter's date format: "Fri Sep 22 06:30:47 +0000 2023"
+        created_date = datetime.strptime(created_at, "%a %b %d %H:%M:%S %z %Y")
+        now = datetime.now(created_date.tzinfo)
+        return (now - created_date).days
+    except ValueError:
+        return 0
+
+def calculate_engagement_ratio(followers, following):
+    """Calculate follower to following ratio."""
+    if following == 0:
+        return 999999.0 if followers > 0 else 0  # Use large number instead of inf for JSON compatibility
+    return round(followers / following, 2)
+
+def calculate_tweet_frequency(tweets, account_age_days):
+    """Calculate average tweets per day."""
+    if account_age_days == 0:
+        return 0
+    return round(tweets / account_age_days, 2)
 

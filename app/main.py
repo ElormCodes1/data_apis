@@ -63,7 +63,7 @@ async def root():
         "available_apis": [
             "/gmaps - Google Maps Business Scraper",
             "/chrome-webstore - Chrome Web Store Extensions Scraper",
-            "/twitter - Twitter Data Scraper",
+            "/twitter - Twitter Data Scraper (includes list members)",
             "/producthunt - ProductHunt Rankings Scraper",
             "/amazon-search - Amazon Product Search Scraper",
             "/youtube - YouTube Transcript Extractor",
