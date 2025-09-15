@@ -2600,164 +2600,189 @@ async def search_tweets(
     posts_list = []
 
     for entries in actual_posts:
-            if "tweet-" not in entries["entryId"]:
-                        continue
-            else:
-                # post_url = entries["entryId"]
+        if "tweet-" not in entries["entryId"]:
+            continue
+        
+        # Check if this entry actually has tweet data
+        try:
+            content = entries.get("content", {})
+            item_content = content.get("itemContent", {})
+            if "tweet_results" not in item_content:
+                continue
+        except:
+            continue
+            
+        # post_url = entries["entryId"]
+        try:
+            entriess = entries["content"]["items"]
+            # print(len(entriess))
+        except:
+            entriess = []
+            # print(f"len of entriesss {len(entriess)}")
+            # print(len(entriess)==0)
+        if len(entriess) == 0:
+            # Try multiple possible structures for username
+            username = None
+            try:
+                # New structure: core -> user_results -> result -> legacy -> screen_name
+                username = entries["content"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+            except:
                 try:
-                    entriess = entries["content"]["items"]
-                    # print(len(entriess))
+                    # Old structure: direct legacy -> screen_name
+                    username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["screen_name"]
                 except:
-                    entriess = []
-                    # print(f"len of entriesss {len(entriess)}")
-                    # print(len(entriess)==0)
-                if len(entriess) == 0:
                     try:
-                        username = entries["content"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+                        # Alternative structure: legacy -> user -> screen_name
+                        username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user"]["screen_name"]
                     except:
-                        username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["screen_name"]
-                    post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
-                    try:
-                        views = entries["content"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
-                    except:
-                        views = None
-                    try:
-                        bookmarks = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
-                    except:
-                        bookmarks = None
-                    try:
-                        tweet_date = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
-                    except:
-                        tweet_date = None
-                    if tweet_date is None:
-                        continue
-                    try:
-                        media_type = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
-                    except:
-                        media_type = None
-                    try:
-                        likes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
-                    except:
-                        likes =None
-                    try:
-                        tweet_text = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
-                        if "RT @" in tweet_text:
-                            isretweet = True
-                        else:
-                            isretweet = False
-                    except:
-                        tweet_text = None
-                    try:
-                        quotes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
-                    except:
-                        quotes = None
-                    try:
-                        replies = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
-                    except:
-                        replies = None
-                    try:
-                        retweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
-                    except:
-                        retweet =  None
-                    try:
-                        quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
-                    except:
-                        quoted_tweet = None
-                    try:
-                        url = post_url
-                    except:
-                        url = None
-
-                    data = {
-                        "views": views,
-                        "bookmarks": bookmarks,
-                        "tweet_date": tweet_date,
-                        "media_type": media_type,
-                        "likes": likes,
-                        "tweet_text": tweet_text,
-                        "quotes": quotes,
-                        "replies": replies,
-                        "retweetc": retweet,
-                        "thread_tweet": False,
-                        "quoted_tweet": quoted_tweet,
-                        "isRetweet": isretweet,
-                        "url": url
-                    }
-                    posts_list.append(data)
-                    print(data)
-
+                        # If all fail, try to extract from user_id_str or other fields
+                        try:
+                            user_id = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user_id_str"]
+                            username = f"user_{user_id}"
+                        except:
+                            username = "unknown_user"
+            post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
+            try:
+                views = entries["content"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
+            except:
+                views = None
+            try:
+                bookmarks = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
+            except:
+                bookmarks = None
+            try:
+                tweet_date = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
+            except:
+                tweet_date = None
+            if tweet_date is None:
+                continue
+            try:
+                media_type = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
+            except:
+                media_type = None
+            try:
+                likes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
+            except:
+                likes =None
+            try:
+                tweet_text = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
+                if "RT @" in tweet_text:
+                    isretweet = True
                 else:
-                    for entry in entriess:
-                        username = entry["item"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
-                        post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
-                        try:
-                            views = entry["item"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
-                        except:
-                            views = None
-                        try:
-                            bookmarks = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
-                        except:
-                            bookmarks = None
-                        try:
-                            tweet_date = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
-                        except:
-                            tweet_date = None
-                        if tweet_date is None:
-                            continue
-                        try:
-                            media_type = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
-                        except:
-                            media_type = None
-                        try:
-                            likes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
-                        except:
-                            likes =None
-                        try:
-                            tweet_text = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
-                            if "RT @" in tweet_text:
-                                isretweet = True
-                            else:
-                                isretweet = False
-                        except:
-                            tweet_text = None
-                        try:
-                            quotes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
-                        except:
-                            quotes = None
-                        try:
-                            replies = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
-                        except:
-                            replies = None
-                        try:
-                            retweet = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
-                        except:
-                            retweet =  None
-                        try:
-                            quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
-                        except:
-                            quoted_tweet = None
-                        try:
-                            url = post_url
-                        except:
-                            url = None
-                        
-                        data = {
-                            "views": views,
-                            "bookmarks": bookmarks,
-                            "tweet_date": tweet_date,
-                            "media_type": media_type,
-                            "likes": likes,
-                            "tweet_text": tweet_text,
-                            "quotes": quotes,
-                            "replies": replies,
-                            "retweetc": retweet,
-                            "quoted_tweet": quoted_tweet,
-                            "thread_tweet": True,
-                            "isRetweet": isretweet,
-                            "url": url
-                        }
-                        posts_list.append(data)
-                        print(data)
+                    isretweet = False
+            except:
+                tweet_text = None
+            try:
+                quotes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
+            except:
+                quotes = None
+            try:
+                replies = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
+            except:
+                replies = None
+            try:
+                retweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
+            except:
+                retweet =  None
+            try:
+                quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
+            except:
+                quoted_tweet = None
+            try:
+                url = post_url
+            except:
+                url = None
+
+            data = {
+                "views": views,
+                "bookmarks": bookmarks,
+                "tweet_date": tweet_date,
+                "media_type": media_type,
+                "likes": likes,
+                "tweet_text": tweet_text,
+                "quotes": quotes,
+                "replies": replies,
+                "retweetc": retweet,
+                "thread_tweet": False,
+                "quoted_tweet": quoted_tweet,
+                "isRetweet": isretweet,
+                "url": url
+            }
+            posts_list.append(data)
+            print(data)
+
+        else:
+            for entry in entriess:
+                username = entry["item"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+                post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
+                try:
+                    views = entry["item"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
+                except:
+                    views = None
+                try:
+                    bookmarks = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
+                except:
+                    bookmarks = None
+                try:
+                    tweet_date = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
+                except:
+                    tweet_date = None
+                if tweet_date is None:
+                    continue
+                try:
+                    media_type = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
+                except:
+                    media_type = None
+                try:
+                    likes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
+                except:
+                    likes =None
+                try:
+                    tweet_text = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
+                    if "RT @" in tweet_text:
+                        isretweet = True
+                    else:
+                        isretweet = False
+                except:
+                    tweet_text = None
+                try:
+                    quotes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
+                except:
+                    quotes = None
+                try:
+                    replies = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
+                except:
+                    replies = None
+                try:
+                    retweet = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
+                except:
+                    retweet =  None
+                try:
+                    quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
+                except:
+                    quoted_tweet = None
+                try:
+                    url = post_url
+                except:
+                    url = None
+                
+                data = {
+                    "views": views,
+                    "bookmarks": bookmarks,
+                    "tweet_date": tweet_date,
+                    "media_type": media_type,
+                    "likes": likes,
+                    "tweet_text": tweet_text,
+                    "quotes": quotes,
+                    "replies": replies,
+                    "retweetc": retweet,
+                    "quoted_tweet": quoted_tweet,
+                    "thread_tweet": True,
+                    "isRetweet": isretweet,
+                    "url": url
+                }
+                posts_list.append(data)
+                print(data)
     
     return {
         "posts": posts_list,
