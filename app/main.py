@@ -18,6 +18,7 @@ from twitter_api import router as twitter_router
 from producthunt_api import router as producthunt_router
 from amazon_search_api import router as amazon_router
 from youtube_transcript_api import router as youtube_router
+from facebook_marketplace_router import router as facebook_marketplace_router
 
 # Configure logging
 logging.basicConfig(
@@ -51,6 +52,7 @@ app.include_router(twitter_router, prefix="/twitter", tags=["Twitter"])
 app.include_router(producthunt_router, prefix="/producthunt", tags=["ProductHunt"])
 app.include_router(amazon_router, prefix="/amazon-search", tags=["Amazon"])
 app.include_router(youtube_router, prefix="/youtube", tags=["YouTube"])
+app.include_router(facebook_marketplace_router, prefix="/facebook-marketplace", tags=["Facebook Marketplace"])
 
 # Health check endpoint
 @app.get("/")
@@ -67,6 +69,7 @@ async def root():
             "/producthunt - ProductHunt Rankings Scraper",
             "/amazon-search - Amazon Product Search Scraper",
             "/youtube - YouTube Transcript Extractor",
+            "/facebook-marketplace - Facebook Marketplace Search",
             "/docs - API Documentation",
             "/health - Health Check"
         ]
