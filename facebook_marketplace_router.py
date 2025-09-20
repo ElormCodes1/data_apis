@@ -71,6 +71,11 @@ def get_coordinates_from_ip(ip: str) -> tuple[float, float]:
     Returns:
         tuple[float, float]: Latitude and longitude
     """
+    # Handle localhost/private IPs by using a default location
+    if ip in ['127.0.0.1', 'localhost', '::1'] or ip.startswith('192.168.') or ip.startswith('10.'):
+        # Use a default location (London) for localhost/private IPs
+        return 51.5074, -0.1278  # London coordinates
+    
     headers = {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -135,70 +140,30 @@ def search_facebook_marketplace(lat: float, lon: float, query: str = "bicycle", 
         'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36',
     }
     
+    # Use the EXACT same format as your working script
     data = {
-        'variables': json.dumps({
-            "buyLocation": {"latitude": lat, "longitude": lon},
-            "contextual_data": None,
-            "count": count,
-            "cursor": None,
-            "params": {
-                "bqf": {
-                    "callsite": "COMMERCE_MKTPLACE_WWW",
-                    "query": query
-                },
-                "browse_request_params": {
-                    "commerce_enable_local_pickup": True,
-                    "commerce_enable_shipping": True,
-                    "commerce_search_and_rp_available": True,
-                    "commerce_search_and_rp_category_id": [],
-                    "commerce_search_and_rp_condition": None,
-                    "commerce_search_and_rp_ctime_days": None,
-                    "filter_location_latitude": lat,
-                    "filter_location_longitude": lon,
-                    "filter_price_lower_bound": 0,
-                    "filter_price_upper_bound": 214748364700,
-                    "filter_radius_km": 250
-                },
-                "custom_request_params": {
-                    "browse_context": None,
-                    "contextual_filters": [],
-                    "referral_code": None,
-                    "referral_ui_component": None,
-                    "saved_search_strid": None,
-                    "search_vertical": "C2C",
-                    "seo_url": None,
-                    "serp_landing_settings": {"virtual_category_id": ""},
-                    "surface": "SEARCH",
-                    "virtual_contextual_filters": []
-                }
-            },
-            "savedSearchID": None,
-            "savedSearchQuery": "",
-            "scale": 2,
-            "shouldIncludePopularSearches": True
-        }),
+        'variables': '{"buyLocation":{"latitude":'+str(lat)+',"longitude":'+str(lon)+'},"contextual_data":null,"count":'+str(count)+',"cursor":null,"params":{"bqf":{"callsite":"COMMERCE_MKTPLACE_WWW","query":"'+query+'"},"browse_request_params":{"commerce_enable_local_pickup":true,"commerce_enable_shipping":true,"commerce_search_and_rp_available":true,"commerce_search_and_rp_category_id":[],"commerce_search_and_rp_condition":null,"commerce_search_and_rp_ctime_days":null,"filter_location_latitude":'+str(lat)+',"filter_location_longitude":'+str(lon)+',"filter_price_lower_bound":0,"filter_price_upper_bound":214748364700,"filter_radius_km":250},"custom_request_params":{"browse_context":null,"contextual_filters":[],"referral_code":null,"referral_ui_component":null,"saved_search_strid":null,"search_vertical":"C2C","seo_url":null,"serp_landing_settings":{"virtual_category_id":""},"surface":"SEARCH","virtual_contextual_filters":[]}},"savedSearchID":null,"savedSearchQuery":"","scale":2,"shouldIncludePopularSearches":true}',
         'doc_id': '31187202734261751',
     }
     
     try:
         response = requests.post('https://www.facebook.com/api/graphql/', headers=headers, data=data)
-        print(f"Facebook API Status: {response.status_code}")
         
         if response.status_code != 200:
-            print(f"Facebook API Error: {response.text}")
             raise HTTPException(status_code=500, detail=f"Facebook API returned status {response.status_code}")
         
         data = response.json()
-        print(f"Facebook API Response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+        
+        # Check for Facebook API errors - but only fail if there's no data
+        if 'errors' in data and 'data' not in data:
+            error_messages = [error.get('message', 'Unknown error') for error in data.get('errors', [])]
+            raise HTTPException(status_code=400, detail=f"Facebook API error: {'; '.join(error_messages)}")
         
         return data
         
     except requests.RequestException as e:
-        print(f"Request error: {e}")
         raise HTTPException(status_code=500, detail=f"Error searching Facebook Marketplace: {str(e)}")
     except json.JSONDecodeError as e:
-        print(f"JSON decode error: {e}")
-        print(f"Response text: {response.text[:500]}")
         raise HTTPException(status_code=500, detail=f"Invalid JSON response from Facebook: {str(e)}")
 
 def get_client_ip(request: Request) -> str:
@@ -249,39 +214,69 @@ async def search_marketplace(
         if city or country:
             # Use provided location (city, country, or both)
             location_query = f"{city or ''}, {country or ''}".strip(', ')
-            print(f"Using location: {location_query}")
             lat, lon = get_coordinates_from_location(city or '', country or '')
             location_source = location_query
         else:
             # Use IP geolocation
             client_ip = get_client_ip(request)
-            print(f"Using IP geolocation: {client_ip}")
             lat, lon = get_coordinates_from_ip(client_ip)
             location_source = f"IP: {client_ip}"
-        
-        print(f"Coordinates: lat={lat}, lon={lon}")
         
         # Search Facebook Marketplace
         marketplace_data = search_facebook_marketplace(lat, lon, query, count)
         
         # Extract and format results
-        if 'data' not in marketplace_data or 'marketplace_search' not in marketplace_data['data']:
+        if not marketplace_data or 'data' not in marketplace_data:
             raise HTTPException(status_code=500, detail="Invalid response from Facebook Marketplace")
         
-        feed_units = marketplace_data['data']['marketplace_search']['feed_units']
+        if 'marketplace_search' not in marketplace_data['data']:
+            raise HTTPException(status_code=500, detail="Invalid response structure from Facebook Marketplace")
+        
+        feed_units = marketplace_data['data']['marketplace_search'].get('feed_units', {})
+        if not feed_units:
+            raise HTTPException(status_code=500, detail="Empty feed_units from Facebook Marketplace")
+        
         edges = feed_units.get('edges', [])
         
         results = []
         for item in edges:
+            if not item:
+                continue
+                
             listing = item.get('node', {}).get('listing', {})
+            if not listing:
+                continue
+            
+            # Safe location extraction
+            location_info = listing.get('location', {})
+            if location_info:
+                reverse_geocode = location_info.get('reverse_geocode', {})
+                if reverse_geocode:
+                    city_page = reverse_geocode.get('city_page', {})
+                    location_name = city_page.get('display_name', '') if city_page else ''
+                else:
+                    location_name = ''
+            else:
+                location_name = ''
+            
+            # Safe price extraction
+            listing_price = listing.get('listing_price', {})
+            price = listing_price.get('formatted_amount', '') if listing_price else ''
+            
+            # Safe image extraction
+            primary_photo = listing.get('primary_listing_photo', {})
+            image_uri = ''
+            if primary_photo:
+                image_data = primary_photo.get('image', {})
+                image_uri = image_data.get('uri', '') if image_data else ''
             
             result = {
                 "name": listing.get('marketplace_listing_title', ''),
-                "price": listing.get('listing_price', {}).get('formatted_amount', ''),
+                "price": price,
                 "url": f"https://www.facebook.com/marketplace/item/{listing.get('id', '')}",
-                "image": listing.get('primary_listing_photo', {}).get('image', {}).get('uri', ''),
+                "image": image_uri,
                 "delivery_types": listing.get('delivery_types', []),
-                "location": listing.get('location', {}).get('reverse_geocode', {}).get('city_page', {}).get('display_name', '')
+                "location": location_name
             }
             results.append(result)
         
