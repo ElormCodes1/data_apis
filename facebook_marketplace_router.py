@@ -71,11 +71,6 @@ def get_coordinates_from_ip(ip: str) -> tuple[float, float]:
     Returns:
         tuple[float, float]: Latitude and longitude
     """
-    # Handle localhost/private IPs by using a default location
-    if ip in ['127.0.0.1', 'localhost', '::1'] or ip.startswith('192.168.') or ip.startswith('10.'):
-        # Use a default location (London) for localhost/private IPs
-        return 51.5074, -0.1278  # London coordinates
-    
     headers = {
         'Accept': '*/*',
         'Accept-Language': 'en-US,en;q=0.9',
@@ -108,7 +103,7 @@ def get_coordinates_from_ip(ip: str) -> tuple[float, float]:
     except requests.RequestException as e:
         raise HTTPException(status_code=500, detail=f"Error getting coordinates from IP: {str(e)}")
 
-def search_facebook_marketplace(lat: float, lon: float, query: str = "bicycle", count: int = 48) -> dict:
+def search_facebook_marketplace(lat: float, lon: float, query: str = "bicycle", count: int = 24) -> dict:
     """
     Search Facebook Marketplace using coordinates.
     
@@ -187,16 +182,23 @@ def search_facebook_marketplace(lat: float, lon: float, query: str = "bicycle", 
     
     try:
         response = requests.post('https://www.facebook.com/api/graphql/', headers=headers, data=data)
+        print(f"Facebook API Status: {response.status_code}")
         
         if response.status_code != 200:
+            print(f"Facebook API Error: {response.text}")
             raise HTTPException(status_code=500, detail=f"Facebook API returned status {response.status_code}")
         
         data = response.json()
+        print(f"Facebook API Response keys: {list(data.keys()) if isinstance(data, dict) else 'Not a dict'}")
+        
         return data
         
     except requests.RequestException as e:
+        print(f"Request error: {e}")
         raise HTTPException(status_code=500, detail=f"Error searching Facebook Marketplace: {str(e)}")
     except json.JSONDecodeError as e:
+        print(f"JSON decode error: {e}")
+        print(f"Response text: {response.text[:500]}")
         raise HTTPException(status_code=500, detail=f"Invalid JSON response from Facebook: {str(e)}")
 
 def get_client_ip(request: Request) -> str:
@@ -247,13 +249,17 @@ async def search_marketplace(
         if city or country:
             # Use provided location (city, country, or both)
             location_query = f"{city or ''}, {country or ''}".strip(', ')
+            print(f"Using location: {location_query}")
             lat, lon = get_coordinates_from_location(city or '', country or '')
             location_source = location_query
         else:
             # Use IP geolocation
             client_ip = get_client_ip(request)
+            print(f"Using IP geolocation: {client_ip}")
             lat, lon = get_coordinates_from_ip(client_ip)
             location_source = f"IP: {client_ip}"
+        
+        print(f"Coordinates: lat={lat}, lon={lon}")
         
         # Search Facebook Marketplace
         marketplace_data = search_facebook_marketplace(lat, lon, query, count)
@@ -314,7 +320,7 @@ async def facebook_marketplace_info():
                 "query": "Search query (optional, default: 'bicycle')",
                 "city": "City name (optional)",
                 "country": "Country name (optional)",
-                "count": "Number of results (optional, default: 48)"
+                "count": "Number of results (optional, default: 24)"
             },
             "location_logic": {
                 "if_city_and_country_provided": "Use those coordinates",
