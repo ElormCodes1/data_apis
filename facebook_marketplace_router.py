@@ -188,6 +188,20 @@ def get_client_ip(request: Request) -> str:
     # Fallback to direct connection IP
     return request.client.host
 
+@router.get("/cors-test")
+async def cors_test():
+    """Simple CORS test endpoint"""
+    return {
+        "message": "CORS test successful",
+        "timestamp": "2024-01-01T00:00:00Z",
+        "cors_enabled": True
+    }
+
+@router.options("/search")
+async def search_marketplace_options():
+    """Handle preflight OPTIONS request for CORS"""
+    return {"message": "OK"}
+
 @router.get("/search")
 async def search_marketplace(
     request: Request,
