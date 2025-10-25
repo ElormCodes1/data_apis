@@ -1359,7 +1359,7 @@ async def get_search_results(task_id: str):
         if task_status.status != "completed":
             logger.warning(f"❌ Task {task_id} not completed yet: {task_status.status}")
             raise HTTPException(
-                status_code=400,
+                status_code=200,
                 detail=f"Task not completed yet. Current status: {task_status.status}"
             )
         
