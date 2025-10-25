@@ -270,7 +270,7 @@ class AmazonScraper:
 
 
             page_num = 1
-            max_pages = 50  # Safety limit to prevent infinite loops
+            max_pages = 100  # Safety limit to prevent infinite loops
             reached_last_page = False
             while page_num <= max_pages and not reached_last_page:
                 # Wait for search results to load
@@ -569,96 +569,218 @@ class AmazonScraper:
                 'sections': {}
             }
             
-            # Find the product description div
-            desc_div = self.driver.find_element(
-                By.ID,
-                "productDescription"
-            )
+            # Try multiple methods to find product description and features
+            features_found = False
             
-            if desc_div:
-                # Get all paragraphs and lists
-                elements = desc_div.find_elements(By.CSS_SELECTOR, "p, ul")
-                
-                current_section = "main"
-                current_text = []
-                
-                for element in elements:
-                    try:
-                        # Handle different element types
-                        if element.tag_name == 'ul':
-                            # Get all list items
-                            items = element.find_elements(By.CSS_SELECTOR, "li span.a-list-item")
-                            for item in items:
-                                try:
-                                    # Try to get bold text (feature title) and regular text
-                                    bold = item.find_element(By.CSS_SELECTOR, "span.a-text-bold").text.strip()
-                                    text = item.text.replace(bold, '', 1).strip()
-                                    
-                                    # Add to features list
-                                    description['features'].append({
-                                        'title': bold.rstrip(' -'),
-                                        'description': text.lstrip(' -')
-                                    })
-                                except NoSuchElementException:
-                                    # If no bold text, just add the whole text as a feature
-                                    text = item.text.strip()
-                                    if text:
-                                        description['features'].append({
-                                            'title': '',
-                                            'description': text
-                                        })
-                                except Exception as e:
-                                    continue
-                                    
-                        elif element.tag_name == 'p':
-                            # Process paragraph text
-                            spans = element.find_elements(By.CSS_SELECTOR, "span")
-                            for span in spans:
-                                try:
-                                    text = span.text.strip()
-                                    if text:
-                                        # Check if this is a section header
-                                        class_attr = span.get_attribute('class') or ""
-                                        is_bold = 'a-text-bold' in class_attr
-                                        is_underlined = span.find_elements(By.TAG_NAME, "u")
-                                        
-                                        if is_bold and is_underlined:
-                                            # This is a new section header
-                                            if current_text:
-                                                # Save the previous section
-                                                description['sections'][current_section] = ' '.join(current_text).strip()
-                                                current_text = []
-                                            current_section = text.replace('\u200b', '').strip()
-                                        else:
-                                            # Add to current section text
-                                            current_text.append(text)
-                                            
-                                except Exception as e:
-                                    continue
-                                    
-                    except Exception as e:
-                        continue
-                
-                # Save the last section
-                if current_text:
-                    description['sections'][current_section] = ' '.join(current_text).strip()
-                
-                # Create full text by combining all sections
-                full_text_parts = []
-                for section, text in description['sections'].items():
-                    if section != "main":
-                        full_text_parts.append(f"{section}\n{text}")
-                    else:
-                        full_text_parts.append(text)
-                
-                description['full_text'] = '\n\n'.join(full_text_parts)
-                
+            # Method 1: Try to find features in the main product description area
+            try:
+                desc_div = self.driver.find_element(By.ID, "productDescription")
+                if desc_div:
+                    self.log("Found productDescription div, attempting feature extraction", "info")
+                    features_found = self._extract_features_from_description_div(desc_div, description)
+                    self.log(f"Method 1 extracted {len(description['features'])} features", "info")
+            except NoSuchElementException:
+                self.log("No productDescription div found", "info")
+            
+            # Method 2: Try to find features in bullet points section
+            if not features_found:
+                try:
+                    self.log("Trying Method 2: feature bullet selectors", "info")
+                    # Look for common feature bullet selectors
+                    feature_selectors = [
+                        "#feature-bullets ul li span.a-list-item",
+                        "#feature-bullets ul li",
+                        ".a-unordered-list.a-vertical.a-spacing-mini li span.a-list-item",
+                        ".a-unordered-list.a-vertical.a-spacing-mini li",
+                        "[data-feature-name]",
+                        ".a-section.a-spacing-medium li"
+                    ]
+                    
+                    for i, selector in enumerate(feature_selectors):
+                        try:
+                            feature_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            self.log(f"Selector {i+1} ({selector}): found {len(feature_elements)} elements", "info")
+                            if feature_elements:
+                                features_found = self._extract_features_from_elements(feature_elements, description)
+                                if features_found:
+                                    self.log(f"Method 2 extracted {len(description['features'])} features using selector {i+1}", "info")
+                                    break
+                        except Exception as e:
+                            self.log(f"Error with selector {i+1}: {e}", "error")
+                            continue
+                except Exception as e:
+                    self.log(f"Method 2 failed: {e}", "error")
+            
+            # Method 3: Try to find features in product details section
+            if not features_found:
+                try:
+                    self.log("Trying Method 3: product details selectors", "info")
+                    details_selectors = [
+                        "#detailBullets_feature_div ul li",
+                        "#detailBullets_feature_div ul li span",
+                        ".a-section.a-spacing-medium ul li"
+                    ]
+                    
+                    for i, selector in enumerate(details_selectors):
+                        try:
+                            detail_elements = self.driver.find_elements(By.CSS_SELECTOR, selector)
+                            self.log(f"Details selector {i+1} ({selector}): found {len(detail_elements)} elements", "info")
+                            if detail_elements:
+                                features_found = self._extract_features_from_elements(detail_elements, description)
+                                if features_found:
+                                    self.log(f"Method 3 extracted {len(description['features'])} features using selector {i+1}", "info")
+                                    break
+                        except Exception as e:
+                            self.log(f"Error with details selector {i+1}: {e}", "error")
+                            continue
+                except Exception as e:
+                    self.log(f"Method 3 failed: {e}", "error")
+            
+            # If we found features, also try to get the full description text
+            if features_found:
+                try:
+                    desc_div = self.driver.find_element(By.ID, "productDescription")
+                    if desc_div:
+                        self._extract_full_description_text(desc_div, description)
+                except NoSuchElementException:
+                    pass
+            
+            self.log(f"Final result: extracted {len(description['features'])} features and {len(description['sections'])} sections", "info")
             return description
             
         except NoSuchElementException:
             return {'full_text': '', 'features': [], 'sections': {}}
         except Exception as e:
+            self.log(f"Error extracting product description: {e}", "error")
             return {'full_text': '', 'features': [], 'sections': {}}
+    
+    def _extract_features_from_description_div(self, desc_div, description):
+        """Extract features from the main product description div"""
+        try:
+            elements = desc_div.find_elements(By.CSS_SELECTOR, "p, ul")
+            current_section = "main"
+            current_text = []
+            
+            for element in elements:
+                try:
+                    if element.tag_name == 'ul':
+                        items = element.find_elements(By.CSS_SELECTOR, "li")
+                        for item in items:
+                            self._process_feature_item(item, description)
+                    elif element.tag_name == 'p':
+                        self._process_paragraph_element(element, description, current_section, current_text)
+                except Exception:
+                    continue
+            
+            return len(description['features']) > 0
+        except Exception:
+            return False
+    
+    def _extract_features_from_elements(self, elements, description):
+        """Extract features from a list of elements"""
+        try:
+            for element in elements:
+                self._process_feature_item(element, description)
+            return len(description['features']) > 0
+        except Exception:
+            return False
+    
+    def _process_feature_item(self, item, description):
+        """Process a single feature item"""
+        try:
+            text = item.text.strip()
+            if not text:
+                return
+            
+            # Try to find bold text (feature title) and regular text
+            try:
+                bold_elements = item.find_elements(By.CSS_SELECTOR, "span.a-text-bold, b, strong")
+                if bold_elements:
+                    bold_text = bold_elements[0].text.strip()
+                    if bold_text and bold_text in text:
+                        description_text = text.replace(bold_text, '', 1).strip()
+                        description['features'].append({
+                            'title': bold_text.rstrip(' -:'),
+                            'description': description_text.lstrip(' -:')
+                        })
+                    else:
+                        description['features'].append({
+                            'title': '',
+                            'description': text
+                        })
+                else:
+                    description['features'].append({
+                        'title': '',
+                        'description': text
+                    })
+            except Exception:
+                description['features'].append({
+                    'title': '',
+                    'description': text
+                })
+        except Exception:
+            pass
+    
+    def _process_paragraph_element(self, element, description, current_section, current_text):
+        """Process paragraph elements for full text extraction"""
+        try:
+            spans = element.find_elements(By.CSS_SELECTOR, "span")
+            for span in spans:
+                try:
+                    text = span.text.strip()
+                    if text:
+                        class_attr = span.get_attribute('class') or ""
+                        is_bold = 'a-text-bold' in class_attr
+                        is_underlined = span.find_elements(By.TAG_NAME, "u")
+                        
+                        if is_bold and is_underlined:
+                            if current_text:
+                                description['sections'][current_section] = ' '.join(current_text).strip()
+                                current_text = []
+                            current_section = text.replace('\u200b', '').strip()
+                        else:
+                            current_text.append(text)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+    
+    def _extract_full_description_text(self, desc_div, description):
+        """Extract full description text from the description div"""
+        try:
+            elements = desc_div.find_elements(By.CSS_SELECTOR, "p, ul")
+            current_section = "main"
+            current_text = []
+            
+            for element in elements:
+                try:
+                    if element.tag_name == 'p':
+                        self._process_paragraph_element(element, description, current_section, current_text)
+                    elif element.tag_name == 'ul':
+                        # Add list items to current section
+                        items = element.find_elements(By.CSS_SELECTOR, "li")
+                        for item in items:
+                            text = item.text.strip()
+                            if text:
+                                current_text.append(text)
+                except Exception:
+                    continue
+            
+            # Save the last section
+            if current_text:
+                description['sections'][current_section] = ' '.join(current_text).strip()
+            
+            # Create full text by combining all sections
+            full_text_parts = []
+            for section, text in description['sections'].items():
+                if section != "main":
+                    full_text_parts.append(f"{section}\n{text}")
+                else:
+                    full_text_parts.append(text)
+            
+            description['full_text'] = '\n\n'.join(full_text_parts)
+        except Exception:
+            pass
 
     def check_and_click_continue_shopping(self):
         """Fast continue shopping button check - only essential logging"""
