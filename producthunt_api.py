@@ -15,6 +15,7 @@ import ssl
 from datetime import datetime
 from urllib.parse import urlencode
 from bs4 import BeautifulSoup
+from curl_cffi import requests as curl_requests
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -29,25 +30,25 @@ except ImportError:
     CACHE_AVAILABLE = False
     cache = None
 
-async def resolve_domain(session: aiohttp.ClientSession, domain: str, name: str, task_id: str) -> Tuple[str, str]:
-    """Resolve a single domain asynchronously"""
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-    }
+def resolve_domain_sync(domain: str, name: str, task_id: str) -> Tuple[str, str]:
+    """Resolve a single domain synchronously using curl_cffi"""
     try:
         # If it's already a full URL, use it directly
         if domain.startswith('http'):
             url = domain
         else:
             url = f"https://{domain}"
-            
-        async with session.get(url, headers=headers, allow_redirects=True, timeout=10) as response:
-            final_url = str(response.url)
-            resolved_domain = urlparse(final_url).netloc
-            # Remove www. prefix from resolved domain
-            clean_domain = resolved_domain.replace('www.', '') if resolved_domain else resolved_domain
-            logger.info(f"✅ Task {task_id}: Resolved domain for {name}: {clean_domain}")
-            return domain, clean_domain
+        
+        # Use curl_cffi to make request with Chrome impersonation
+        r = curl_requests.get(url, impersonate="chrome", timeout=10, allow_redirects=True)
+        
+        # Get the final URL after following redirects
+        final_url = r.url
+        resolved_domain = urlparse(final_url).netloc
+        # Remove www. prefix from resolved domain
+        clean_domain = resolved_domain.replace('www.', '') if resolved_domain else resolved_domain
+        logger.info(f"✅ Task {task_id}: Resolved domain for {name}: {clean_domain}")
+        return domain, clean_domain
     except Exception as e:
         logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain for {name}: {domain}. Error: {str(e)}")
         return domain, domain
@@ -95,24 +96,22 @@ async def resolve_domains_batch(domains_data: List[Tuple[str, str, str]], task_i
 
     # Only proceed with HTTP requests if there are unresolved domains
     if domains_data:
-        # Configure SSL context to handle certificate verification
-        ssl_context = ssl.create_default_context()
-        ssl_context.check_hostname = False
-        ssl_context.verify_mode = ssl.CERT_NONE
+        # Use ThreadPoolExecutor to run curl_cffi requests in parallel
+        from concurrent.futures import ThreadPoolExecutor
         
-        connector = aiohttp.TCPConnector(ssl=ssl_context)
-        timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds total timeout
-        
-        async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        with ThreadPoolExecutor(max_workers=batch_size) as executor:
             for i in range(0, len(domains_data), batch_size):
                 batch = domains_data[i:i + batch_size]
-                tasks = [resolve_domain(session, domain, name, task_id) for domain, name, _ in batch]
-                results = await asyncio.gather(*tasks, return_exceptions=True)
+                # Submit all tasks to thread pool and keep track of which domain each future corresponds to
+                future_to_domain = {
+                    executor.submit(resolve_domain_sync, domain, name, task_id): domain 
+                    for domain, name, _ in batch
+                }
                 
-                for (original_domain, resolved_domain) in results:
-                    if isinstance(resolved_domain, Exception):
-                        resolved_domains[original_domain] = original_domain
-                    else:
+                # Wait for all tasks in this batch to complete
+                for future, original_domain in future_to_domain.items():
+                    try:
+                        _, resolved_domain = future.result(timeout=30)
                         resolved_domains[original_domain] = resolved_domain
                         # Cache the result if cache is available
                         if CACHE_AVAILABLE and cache:
@@ -120,6 +119,10 @@ async def resolve_domains_batch(domains_data: List[Tuple[str, str, str]], task_i
                                 cache.set(f"domain:{original_domain}", resolved_domain, expire=86400)  # Cache for 24 hours
                             except Exception as e:
                                 logger.warning(f"⚠️ Task {task_id}: Failed to cache domain {original_domain}: {str(e)}")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain {original_domain} in batch: {str(e)}")
+                        # If resolution fails, use original domain
+                        resolved_domains[original_domain] = original_domain
     
     return resolved_domains
 
@@ -584,62 +587,191 @@ def scrape_todays_launches_task(task_id: str):
         homepage_products = []  # Featured products from homepage
         graphql_products = []   # Additional products from GraphQL
         
-        logger.info(f"🔧 Initializing Chrome WebDriver for task {task_id}")
-        driver = setup_chrome_driver()
+        # Method 1: Direct webpage scraping for homepage data (featured products first)
+        logger.info(f"🌐 Task {task_id}: Scraping main ProductHunt page for homepage data")
         
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.6',
+            'cache-control': 'max-age=0',
+            'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+            'sec-gpc': '1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        }
+        
+        # Use curl_cffi for the main page
+        response = curl_requests.get('https://www.producthunt.com/', headers=headers, impersonate="chrome")
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract data from script tags
+        json_content1 = None
+        for script in soup.find_all('script'):
+            content = script.get_text()
+            if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
+                content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
+                json_content1 = json.loads(content)
+                if json_content1:
+                    logger.info(f"✅ Task {task_id}: Successfully extracted JSON content from homepage")
+                    # with open('homepage_data.json', 'w') as f:
+                    #     json.dump(json_content1, f)
+                break
+        
+        if json_content1 and 'events' in json_content1 and len(json_content1['events']) >= 1:
+            try:
+                event_data = json_content1['events'][-2]['value']['data']['homefeed']
+            except Exception as e:
+                for node in json_content1['events']:
+                    try:
+                        event_data = node['value']['data']['homefeed']
+                    except Exception as e:
+                        continue
+            
+            if not event_data:
+                raise Exception("Could not extract event data from homepage")
+            
+            # Get pagination info
+            page_info = event_data.get('pageInfo', {})
+            has_next_page = page_info.get('hasNextPage', False)
+            cursor = page_info.get('endCursor')
+            
+            logger.info(f"📄 Task {task_id}: Page info - hasNextPage: {has_next_page}, cursor: {cursor}")
+            
+            # Extract products from webpage data
+            edges = event_data.get('edges', [])
+            if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
+                products = edges[0]['node']['items']
+                logger.info(f"📋 Task {task_id}: Found {len(products)} products from homepage")
+                
+                for product in products:
+                    try:
+                        # Extract product data with error handling
+                        name = product.get('name')
+                        slug = product.get('slug')
+                        tagline = product.get('tagline')
+                        
+                        # Extract thumbnail URL
+                        thumbnail_uuid = product.get('thumbnailImageUuid')
+                        thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
+                        
+                        # Extract short URL
+                        short_url = product.get('shortenedUrl')
+                        domain = f'https://producthunt.com{short_url}' if short_url else None
+
+                        if domain:
+                            # Store the Product Hunt URL as key for resolution
+                            domains_to_resolve.append((domain, name, {'id': product.get('id'), 'domain': domain}))
+
+                        # headers = {
+                        #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+                        # } 
+
+                        # try:
+                        #     resp = requests.get(domain1, allow_redirects=True, headers=headers)
+
+                        #     final_url = resp.url
+                        #     domain = urlparse(final_url).netloc
+                        # except:
+                        #     domain = domain1
+                        
+                        # Construct product URL
+                        url = f'https://producthunt.com/products/{slug}' if slug else None
+                        
+                        # Extract rankings
+                        daily_rank = product.get('dailyRank')
+                        weekly_rank = product.get('weeklyRank')
+                        monthly_rank = product.get('monthlyRank')
+                        
+                        # Extract engagement metrics
+                        votes_count = product.get('votesCount')
+                        comments_count = product.get('commentsCount')
+                        latest_score = product.get('latestScore')
+                        launch_day_score = product.get('launchDayScore')
+                        
+                        # Extract timestamps
+                        created_at = product.get('createdAt')
+                        
+                        # Extract categories
+                        categories = None
+                        try:
+                            topics = product.get('topics', {}).get('edges', [])
+                            if topics:
+                                category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
+                                categories = ', '.join(category_names)
+                        except Exception:
+                            categories = None
+                        
+                        product_data = Product(
+                            id=product.get('id', ''),
+                            name=name or '',
+                            slug=slug or '',
+                            tagline=tagline or '',
+                            thumbnail_image_uuid=thumbnail_image_uuid,
+                            domain=domain.replace('www.', '') if domain else None,
+                            url=url,
+                            daily_rank=daily_rank,
+                            weekly_rank=weekly_rank,
+                            monthly_rank=monthly_rank,
+                            votes_count=votes_count,
+                            comments_count=comments_count,
+                            latest_score=latest_score,
+                            launch_day_score=launch_day_score,
+                            created_at=created_at,
+                            categories=categories
+                        )
+                        
+                        homepage_products.append(product_data)
+                        logger.debug(f"✅ Task {task_id}: Extracted homepage product {product_data.name}")
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Task {task_id}: Failed to extract product from homepage: {str(e)}")
+                        continue
+        # logger.info(f"✅ Task {task_id}: Extracted {homepage_products} products from homepage")
+            
+        # Method 2: GraphQL API call for unfeatured posts (secondary products)
+        logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
+        
+        params = {
+            'operationName': 'UnfeaturedPosts',
+            'variables': '{}',
+            'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"1bd72d19202b71cb24af080d6803328bbbeff11630bcec2c9caab0eb1b03aff5"}}',
+        }
+        
+        base_url = 'https://www.producthunt.com/frontend/graphql'
+        url = base_url + '?' + urlencode(params)
+        
+        # Use curl_cffi to make GraphQL API call
+        logger.info(f"⏳ Task {task_id}: Fetching GraphQL response...")
+        graphql_response = curl_requests.get(url, headers=headers, impersonate="chrome")
+
+        # print("graphql_response", graphql_response.text)
+        
+        # Parse response - GraphQL endpoint returns JSON directly
         try:
-            # Method 1: Direct webpage scraping for homepage data (featured products first)
-            logger.info(f"🌐 Task {task_id}: Scraping main ProductHunt page for homepage data")
-            
-            headers = {
-                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'accept-language': 'en-US,en;q=0.6',
-                'cache-control': 'max-age=0',
-                'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
-                'sec-ch-ua-mobile': '?0',
-                'sec-ch-ua-platform': '"macOS"',
-                'sec-fetch-dest': 'document',
-                'sec-fetch-mode': 'navigate',
-                'sec-fetch-site': 'same-origin',
-                'sec-fetch-user': '?1',
-                'sec-gpc': '1',
-                'upgrade-insecure-requests': '1',
-                'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
-            }
-            
-            # Use requests for the main page
-            import requests
-            response = requests.get('https://www.producthunt.com/', headers=headers)
-            soup = BeautifulSoup(response.text, 'html.parser')
-            
-            # Extract data from script tags
-            json_content1 = None
-            for script in soup.find_all('script'):
-                content = script.get_text()
-                if content and content.strip().startswith('(window[Symbol.for("ApolloSSRDataTransport")]'):
-                    content = (content.replace('(window[Symbol.for("ApolloSSRDataTransport")] ??= []).push(', '').replace('undefined', 'null'))[:-1]
-                    json_content1 = json.loads(content)
-                    if json_content1:
-                        logger.info(f"✅ Task {task_id}: Successfully extracted JSON content from homepage")
-                        # with open('homepage_data.json', 'w') as f:
-                        #     json.dump(json_content1, f)
-                    break
-            
-            if json_content1 and 'events' in json_content1 and len(json_content1['events']) >= 1:
-                event_data = json_content1['events'][1]['value']['data']['homefeed']
-                
-                # Get pagination info
-                page_info = event_data.get('pageInfo', {})
-                has_next_page = page_info.get('hasNextPage', False)
-                cursor = page_info.get('endCursor')
-                
-                logger.info(f"📄 Task {task_id}: Page info - hasNextPage: {has_next_page}, cursor: {cursor}")
-                
-                # Extract products from webpage data
-                edges = event_data.get('edges', [])
+            json_data = graphql_response.json()
+        except json.JSONDecodeError:
+            # If response is HTML (error page), try to parse as HTML
+            soup_graphql = BeautifulSoup(graphql_response.text, 'html.parser')
+            pre_content = soup_graphql.find('pre')
+            if pre_content:
+                json_data = json.loads(pre_content.get_text())
+            else:
+                logger.warning(f"⚠️ Task {task_id}: Could not parse GraphQL response")
+                json_data = None
+        
+        if json_data:
+            # Extract products from GraphQL response
+            if 'data' in json_data and 'homefeed' in json_data['data']:
+                edges = json_data['data']['homefeed'].get('edges', [])
                 if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
                     products = edges[0]['node']['items']
-                    logger.info(f"📋 Task {task_id}: Found {len(products)} products from homepage")
+                    logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
                     
                     for product in products:
                         try:
@@ -656,21 +788,10 @@ def scrape_todays_launches_task(task_id: str):
                             short_url = product.get('shortenedUrl')
                             domain = f'https://producthunt.com{short_url}' if short_url else None
 
+                            # Store domain for batch resolution
                             if domain:
                                 # Store the Product Hunt URL as key for resolution
                                 domains_to_resolve.append((domain, name, {'id': product.get('id'), 'domain': domain}))
-
-                            # headers = {
-                            #     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
-                            # } 
-
-                            # try:
-                            #     resp = requests.get(domain1, allow_redirects=True, headers=headers)
-
-                            #     final_url = resp.url
-                            #     domain = urlparse(final_url).netloc
-                            # except:
-                            #     domain = domain1
                             
                             # Construct product URL
                             url = f'https://producthunt.com/products/{slug}' if slug else None
@@ -718,180 +839,68 @@ def scrape_todays_launches_task(task_id: str):
                                 categories=categories
                             )
                             
-                            homepage_products.append(product_data)
-                            logger.debug(f"✅ Task {task_id}: Extracted homepage product {product_data.name}")
-                                
+                            graphql_products.append(product_data)
+                            logger.debug(f"✅ Task {task_id}: Extracted GraphQL product {product_data.name}")
+                            
                         except Exception as e:
-                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from homepage: {str(e)}")
+                            logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
                             continue
-            # logger.info(f"✅ Task {task_id}: Extracted {homepage_products} products from homepage")
-            
-            # Method 2: GraphQL API call for unfeatured posts (secondary products)
-            logger.info(f"🌐 Task {task_id}: Making GraphQL API call for unfeatured posts")
-            
-            params = {
-                'operationName': 'UnfeaturedPosts',
-                'variables': '{}',
-                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"96c4888ea89cb7a0ce6b621e09ec3a487a224ae73a77f578ceecbe5f4f2b5ac4"}}',
-            }
-            
-            base_url = 'https://www.producthunt.com/frontend/graphql'
-            url = base_url + '?' + urlencode(params)
-            
-            driver.get(url)
-            
-            # Wait for page to load
-            logger.info(f"⏳ Task {task_id}: Waiting for GraphQL response...")
-            WebDriverWait(driver, 10).until(
-                EC.presence_of_element_located((By.TAG_NAME, "pre"))
-            )
-            
-            # Parse response
-            soup = BeautifulSoup(driver.page_source, 'html.parser')
-            pre_content = soup.find('pre')
-            
-            if pre_content:
-                json_data = json.loads(pre_content.get_text())
+        
+        # Combine products with homepage products first, then GraphQL products
+        # Remove duplicates from GraphQL products that already exist in homepage
+        homepage_ids = {p.id for p in homepage_products if p.id}
+        homepage_names = {p.name for p in homepage_products if p.name and not p.id}
+        
+        # Filter out duplicates from GraphQL products
+        unique_graphql_products = []
+        for product in graphql_products:
+            if product.id and product.id not in homepage_ids:
+                unique_graphql_products.append(product)
+            elif product.name and product.name not in homepage_names:
+                unique_graphql_products.append(product)
+            else:
+                logger.debug(f"⏭️ Task {task_id}: Skipped duplicate GraphQL product {product.name}")
+        
+        # Resolve all domains in batches
+        logger.info(f"🌐 Task {task_id}: Resolving {len(domains_to_resolve)} domains in batches")
+        
+        # Create event loop in the background task
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        resolved_domains = loop.run_until_complete(resolve_domains_batch(domains_to_resolve, task_id))
+        loop.close()
+        
+        # Create new product instances with resolved domains
+        def update_product_domain(product_data):
+            if isinstance(product_data, dict):
+                # For raw dictionary data
+                domain = product_data.get('domain')
+            else:
+                # For existing Product instances
+                domain = product_data.domain
+
+            # Get the resolved domain if available
+            if domain in resolved_domains:
+                resolved = resolved_domains[domain]
+                logger.info(f"🔄 Updating domain for {product_data.name if hasattr(product_data, 'name') else product_data.get('name')}: {domain} -> {resolved}")
                 
-                # Extract products from GraphQL response
-                if 'data' in json_data and 'homefeed' in json_data['data']:
-                    edges = json_data['data']['homefeed'].get('edges', [])
-                    if edges and 'node' in edges[0] and 'items' in edges[0]['node']:
-                        products = edges[0]['node']['items']
-                        logger.info(f"📋 Task {task_id}: Found {len(products)} products from GraphQL")
-                        
-                        for product in products:
-                            try:
-                                # Extract product data with error handling
-                                name = product.get('name')
-                                slug = product.get('slug')
-                                tagline = product.get('tagline')
-                                
-                                # Extract thumbnail URL
-                                thumbnail_uuid = product.get('thumbnailImageUuid')
-                                thumbnail_image_uuid = f'https://ph-files.imgix.net/{thumbnail_uuid}' if thumbnail_uuid else None
-                                
-                                # Extract short URL
-                                short_url = product.get('shortenedUrl')
-                                domain = f'https://producthunt.com{short_url}' if short_url else None
-
-                                # Store domain for batch resolution
-                                if domain:
-                                    # Store the Product Hunt URL as key for resolution
-                                    domains_to_resolve.append((domain, name, {'id': product.get('id'), 'domain': domain}))
-                                
-                                # Construct product URL
-                                url = f'https://producthunt.com/products/{slug}' if slug else None
-                                
-                                # Extract rankings
-                                daily_rank = product.get('dailyRank')
-                                weekly_rank = product.get('weeklyRank')
-                                monthly_rank = product.get('monthlyRank')
-                                
-                                # Extract engagement metrics
-                                votes_count = product.get('votesCount')
-                                comments_count = product.get('commentsCount')
-                                latest_score = product.get('latestScore')
-                                launch_day_score = product.get('launchDayScore')
-                                
-                                # Extract timestamps
-                                created_at = product.get('createdAt')
-                                
-                                # Extract categories
-                                categories = None
-                                try:
-                                    topics = product.get('topics', {}).get('edges', [])
-                                    if topics:
-                                        category_names = [cat['node']['name'] for cat in topics if cat.get('node', {}).get('name')]
-                                        categories = ', '.join(category_names)
-                                except Exception:
-                                    categories = None
-                                
-                                product_data = Product(
-                                    id=product.get('id', ''),
-                                    name=name or '',
-                                    slug=slug or '',
-                                    tagline=tagline or '',
-                                    thumbnail_image_uuid=thumbnail_image_uuid,
-                                    domain=domain.replace('www.', '') if domain else None,
-                                    url=url,
-                                    daily_rank=daily_rank,
-                                    weekly_rank=weekly_rank,
-                                    monthly_rank=monthly_rank,
-                                    votes_count=votes_count,
-                                    comments_count=comments_count,
-                                    latest_score=latest_score,
-                                    launch_day_score=launch_day_score,
-                                    created_at=created_at,
-                                    categories=categories
-                                )
-                                
-                                graphql_products.append(product_data)
-                                logger.debug(f"✅ Task {task_id}: Extracted GraphQL product {product_data.name}")
-                                
-                            except Exception as e:
-                                logger.warning(f"⚠️ Task {task_id}: Failed to extract product from GraphQL: {str(e)}")
-                                continue
-            
-            # Combine products with homepage products first, then GraphQL products
-            # Remove duplicates from GraphQL products that already exist in homepage
-            homepage_ids = {p.id for p in homepage_products if p.id}
-            homepage_names = {p.name for p in homepage_products if p.name and not p.id}
-            
-            # Filter out duplicates from GraphQL products
-            unique_graphql_products = []
-            for product in graphql_products:
-                if product.id and product.id not in homepage_ids:
-                    unique_graphql_products.append(product)
-                elif product.name and product.name not in homepage_names:
-                    unique_graphql_products.append(product)
-                else:
-                    logger.debug(f"⏭️ Task {task_id}: Skipped duplicate GraphQL product {product.name}")
-            
-            # Resolve all domains in batches
-            logger.info(f"🌐 Task {task_id}: Resolving {len(domains_to_resolve)} domains in batches")
-            
-            # Create event loop in the background task
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-            resolved_domains = loop.run_until_complete(resolve_domains_batch(domains_to_resolve, task_id))
-            loop.close()
-            
-            # Create new product instances with resolved domains
-            def update_product_domain(product_data):
                 if isinstance(product_data, dict):
-                    # For raw dictionary data
-                    domain = product_data.get('domain')
+                    product_data['domain'] = resolved
+                    return Product(**product_data)
                 else:
-                    # For existing Product instances
-                    domain = product_data.domain
+                    data = product_data.dict()
+                    data['domain'] = resolved
+                    return Product(**data)
+            return product_data
 
-                # Get the resolved domain if available
-                if domain in resolved_domains:
-                    resolved = resolved_domains[domain]
-                    logger.info(f"🔄 Updating domain for {product_data.name if hasattr(product_data, 'name') else product_data.get('name')}: {domain} -> {resolved}")
-                    
-                    if isinstance(product_data, dict):
-                        product_data['domain'] = resolved
-                        return Product(**product_data)
-                    else:
-                        data = product_data.dict()
-                        data['domain'] = resolved
-                        return Product(**data)
-                return product_data
-
-            # Update domains in both lists
-            homepage_products = [update_product_domain(product) for product in homepage_products]
-            unique_graphql_products = [update_product_domain(product) for product in unique_graphql_products]
-            
-            # Combine: homepage products first, then unique GraphQL products
-            all_products = homepage_products + unique_graphql_products
-            
-            logger.info(f"📊 Task {task_id}: Combined {len(homepage_products)} homepage products + {len(unique_graphql_products)} unique GraphQL products = {len(all_products)} total")
-            
-        finally:
-            logger.info(f"🧹 Task {task_id}: Closing Chrome WebDriver")
-            driver.quit()
+        # Update domains in both lists
+        homepage_products = [update_product_domain(product) for product in homepage_products]
+        unique_graphql_products = [update_product_domain(product) for product in unique_graphql_products]
+        
+        # Combine: homepage products first, then unique GraphQL products
+        all_products = homepage_products + unique_graphql_products
+        
+        logger.info(f"📊 Task {task_id}: Combined {len(homepage_products)} homepage products + {len(unique_graphql_products)} unique GraphQL products = {len(all_products)} total")
         
         # Update task status to completed
         task_status[task_id].status = "completed"
