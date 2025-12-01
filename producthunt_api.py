@@ -1417,7 +1417,7 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
         
         # Use curl_cffi for the initial category page
         response = curl_requests.get(category_url, headers=headers, impersonate="chrome")
-        # print("response22", response.text)
+        # logger.info("response22", response.text)
         # with open('response22.html', 'w') as f:
         #     f.write(response.text)
         soup = BeautifulSoup(response.text, 'html.parser')
@@ -2217,7 +2217,7 @@ async def get_categories():
         params = {
             'operationName': 'HeaderDesktopProductsNavigationQuery',
             'variables': '{}',
-            'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"fd37cb954d265af3f43315fe547c112ca5e1c8e0ef70d1cec6b1601f01c7aa08"}}',
+            'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"b837580ad37ccb60cafa1e4dca02cedfcb1d60dd6742323032ee0f64204fc579"}}',
         }
         
         base_url = 'https://www.producthunt.com/frontend/graphql'
