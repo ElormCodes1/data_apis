@@ -53,6 +53,45 @@ def resolve_domain_sync(domain: str, name: str, task_id: str) -> Tuple[str, str]
         logger.warning(f"⚠️ Task {task_id}: Failed to resolve domain for {name}: {domain}. Error: {str(e)}")
         return domain, domain
 
+def extract_description_from_product_page(product_url: str, task_id: str) -> Optional[str]:
+    """Extract description from ProductHunt product detail page using curl_cffi"""
+    try:
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.6',
+            'cache-control': 'max-age=0',
+            'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+            'sec-gpc': '1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        }
+        
+        # Use curl_cffi to fetch product detail page
+        response = curl_requests.get(product_url, headers=headers, impersonate="chrome", timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract description from <div class="line-clamp-2"><span>...</span></div>
+        description_div = soup.find('div', class_='line-clamp-2')
+        if description_div:
+            span = description_div.find('span')
+            if span:
+                description = span.get_text(strip=True)
+                logger.info(f"✅ Task {task_id}: Extracted description from product page: {product_url}")
+                return description
+        
+        logger.warning(f"⚠️ Task {task_id}: No description found on product page: {product_url}")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Task {task_id}: Failed to extract description from {product_url}. Error: {str(e)}")
+        return None
+
 async def scrape_product_detail_for_domain(session: aiohttp.ClientSession, product_url: str, name: str, task_id: str) -> Tuple[str, str]:
     """Scrape a product detail page to extract the actual website domain from 'Visit website' button"""
     headers = {
