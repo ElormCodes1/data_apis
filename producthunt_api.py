@@ -76,20 +76,151 @@ def extract_description_from_product_page(product_url: str, task_id: str) -> Opt
         response = curl_requests.get(product_url, headers=headers, impersonate="chrome", timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')
         
-        # Extract description from <div class="line-clamp-2"><span>...</span></div>
-        description_div = soup.find('div', class_='line-clamp-2')
-        if description_div:
-            span = description_div.find('span')
-            if span:
-                description = span.get_text(strip=True)
-                logger.info(f"✅ Task {task_id}: Extracted description from product page: {product_url}")
-                return description
+        # Extract description using the CSS selector path: #root-container > div.pt-header > div > main > div.flex.flex-col.gap-3 > div.relative.text-16.font-normal.text-gray-700
+        # Try multiple approaches to find the description
+        
+        # Method 1: Use CSS selector directly
+        try:
+            description_div = soup.select_one('#root-container > div.pt-header > div > main > div.flex.flex-col.gap-3 > div.relative.text-16.font-normal.text-gray-700')
+            if description_div:
+                description = description_div.get_text(strip=True)
+                if description:
+                    logger.info(f"✅ Task {task_id}: Extracted description from product page: {product_url}")
+                    return description
+        except Exception as e:
+            logger.debug(f"Method 1 failed: {str(e)}")
+        
+        # Method 2: Navigate through the path structure
+        try:
+            root_container = soup.find('div', id='root-container')
+            if root_container:
+                pt_header = root_container.find('div', class_='pt-header')
+                if pt_header:
+                    # Find the div inside pt-header
+                    inner_div = pt_header.find('div', recursive=False)
+                    if inner_div:
+                        main = inner_div.find('main')
+                        if main:
+                            # Find div with classes flex, flex-col, gap-3
+                            flex_col = main.find('div', class_=lambda x: x and 'flex' in x and 'flex-col' in x and 'gap-3' in x)
+                            if flex_col:
+                                # Find div with classes relative, text-16, font-normal, text-gray-700
+                                description_div = flex_col.find('div', class_=lambda x: x and 'relative' in x and 'text-16' in x and 'font-normal' in x and 'text-gray-700' in x)
+                                if description_div:
+                                    description = description_div.get_text(strip=True)
+                                    if description:
+                                        logger.info(f"✅ Task {task_id}: Extracted description from product page (method 2): {product_url}")
+                                        return description
+        except Exception as e:
+            logger.debug(f"Method 2 failed: {str(e)}")
+        
+        # Method 3: Try finding by class combination directly (simpler approach)
+        try:
+            description_div = soup.find('div', class_=lambda x: x and 'relative' in x and 'text-16' in x and 'font-normal' in x and 'text-gray-700' in x)
+            if description_div:
+                description = description_div.get_text(strip=True)
+                if description:
+                    logger.info(f"✅ Task {task_id}: Extracted description from product page (method 3): {product_url}")
+                    return description
+        except Exception as e:
+            logger.debug(f"Method 3 failed: {str(e)}")
+        
+        # Method 4: Try the line-clamp-2 approach as fallback
+        try:
+            description_div = soup.find('div', class_='line-clamp-2')
+            if description_div:
+                span = description_div.find('span')
+                if span:
+                    description = span.get_text(strip=True)
+                    if description:
+                        logger.info(f"✅ Task {task_id}: Extracted description from product page (method 4): {product_url}")
+                        return description
+        except Exception as e:
+            logger.debug(f"Method 4 failed: {str(e)}")
         
         logger.warning(f"⚠️ Task {task_id}: No description found on product page: {product_url}")
         return None
         
     except Exception as e:
         logger.warning(f"⚠️ Task {task_id}: Failed to extract description from {product_url}. Error: {str(e)}")
+        return None
+
+def extract_media_images_from_product_page(product_url: str, task_id: str) -> Optional[List[str]]:
+    """Extract media images from ProductHunt product detail page using curl_cffi"""
+    try:
+        headers = {
+            'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'accept-language': 'en-US,en;q=0.6',
+            'cache-control': 'max-age=0',
+            'sec-ch-ua': '"Brave";v="137", "Chromium";v="137", "Not/A)Brand";v="24"',
+            'sec-ch-ua-mobile': '?0',
+            'sec-ch-ua-platform': '"macOS"',
+            'sec-fetch-dest': 'document',
+            'sec-fetch-mode': 'navigate',
+            'sec-fetch-site': 'same-origin',
+            'sec-fetch-user': '?1',
+            'sec-gpc': '1',
+            'upgrade-insecure-requests': '1',
+            'user-agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36',
+        }
+        
+        # Use curl_cffi to fetch product detail page
+        response = curl_requests.get(product_url, headers=headers, impersonate="chrome", timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        media_images = []
+        seen_urls = set()  # To avoid duplicates
+        
+        # Find all images with class "rounded-xl" (gallery images)
+        # The images are in the same HTML structure where we get the description
+        images = soup.find_all('img', class_='rounded-xl')
+        
+        for img in images:
+            # Try to get URL from srcset first (it has multiple resolutions)
+            img_url = None
+            
+            # Extract from srcset (format: "url1 1x, url2 2x, url3 3x")
+            srcset = img.get('srcset')
+            if srcset:
+                # Get the first URL from srcset (1x version)
+                # Split by comma and get the first part, then split by space to get URL
+                first_part = srcset.split(',')[0].strip()
+                img_url = first_part.split()[0] if ' ' in first_part else first_part
+            
+            # Fallback to src attribute
+            if not img_url:
+                img_url = img.get('src')
+            
+            # Fallback to data-src if available
+            if not img_url:
+                img_url = img.get('data-src')
+            
+            if img_url:
+                # Clean up the URL
+                # Remove query parameters to get base URL
+                if '?' in img_url:
+                    img_url = img_url.split('?')[0]
+                
+                # Handle relative URLs
+                if img_url.startswith('//'):
+                    img_url = 'https:' + img_url
+                elif img_url.startswith('/'):
+                    img_url = 'https://www.producthunt.com' + img_url
+                
+                # Only add if it's from imgix (ph-files.imgix.net) and not already seen
+                if 'ph-files.imgix.net' in img_url and img_url not in seen_urls:
+                    media_images.append(img_url)
+                    seen_urls.add(img_url)
+        
+        if media_images:
+            logger.info(f"✅ Task {task_id}: Extracted {len(media_images)} media images from product page: {product_url}")
+            return media_images
+        
+        logger.warning(f"⚠️ Task {task_id}: No media images found on product page: {product_url}")
+        return None
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Task {task_id}: Failed to extract media images from {product_url}. Error: {str(e)}")
         return None
 
 async def scrape_product_detail_for_domain(session: aiohttp.ClientSession, product_url: str, name: str, task_id: str) -> Tuple[str, str]:
@@ -280,7 +411,6 @@ class CategoryProduct(BaseModel):
     categories: Optional[str] = None
     description: Optional[str] = None
     media_images: Optional[List[str]] = None
-    featured_shoutouts_to_count: Optional[int] = None
     posts_count: Optional[int] = None
 
 class TaskStatus(BaseModel):
@@ -1685,6 +1815,15 @@ def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[Cate
         # Extract description
         description = product_node.get('description')
         
+        # If description is missing, try to fetch it from product detail page
+        if not description and url:
+            try:
+                description = extract_description_from_product_page(url, "category_products")
+                if description:
+                    logger.info(f"✅ Fetched description from product page for: {name}")
+            except Exception as e:
+                logger.debug(f"Could not fetch description from product page for {name}: {str(e)}")
+        
         # Extract media images
         media_images = None
         try:
@@ -1694,8 +1833,17 @@ def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[Cate
         except Exception:
             media_images = None
         
+        # If media images are missing, try to fetch them from product detail page
+        if (not media_images or len(media_images) == 0) and url:
+            try:
+                scraped_media_images = extract_media_images_from_product_page(url, "category_products")
+                if scraped_media_images and len(scraped_media_images) > 0:
+                    media_images = scraped_media_images
+                    logger.info(f"✅ Fetched {len(media_images)} media images from product page for: {name}")
+            except Exception as e:
+                logger.debug(f"Could not fetch media images from product page for {name}: {str(e)}")
+        
         # Extract additional metrics
-        featured_shoutouts_to_count = len(product_node.get('featuredShoutoutsToCount', []))
         posts_count = product_node.get('postsCount')
         
         return CategoryProduct(
@@ -1712,7 +1860,6 @@ def extract_category_product_data(product_node: Dict[str, Any]) -> Optional[Cate
             categories=categories,
             description=description,
             media_images=media_images,
-            featured_shoutouts_to_count=featured_shoutouts_to_count,
             posts_count=posts_count
         )
         
