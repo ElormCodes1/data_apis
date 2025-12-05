@@ -49,6 +49,30 @@ HEADERS = {
 }
 
 
+def extract_domain(url_or_query: str) -> str:
+    """
+    Extract domain from URL or query string.
+    Strips protocol, www, and path to get just the domain.
+    """
+    if not url_or_query:
+        return ""
+    
+    # Remove protocol if present
+    url = url_or_query.lower().strip()
+    if url.startswith(('http://', 'https://')):
+        url = url.split('://', 1)[1]
+    
+    # Remove path and query parameters
+    url = url.split('/')[0]
+    url = url.split('?')[0]
+    
+    # Remove www. prefix
+    if url.startswith('www.'):
+        url = url[4:]
+    
+    return url
+
+
 @router.get("/crunchbase_info")
 async def get_crunchbase_info(
     query: str = Query(..., description="Company name or identifier to search for")
@@ -94,68 +118,113 @@ async def get_crunchbase_info(
         autocomplete_data = autocomplete_response.json()
         
         # Check if we have results
-        if not autocomplete_data.get('entities') or len(autocomplete_data['entities']) == 0:
+        entities = autocomplete_data.get('entities', [])
+        if not entities or len(entities) == 0:
             raise HTTPException(
                 status_code=404,
                 detail=f"No company found matching query: {query}"
             )
         
-        # Get the first result's permalink
-        company_permalink = autocomplete_data['entities'][0]['identifier']['permalink']
-        logger.info(f"Found company permalink: {company_permalink}")
+        logger.info(f"Found {len(entities)} entities to check")
         
-        # Step 2: Fetch detailed company information
-        base_url = f"https://www.crunchbase.com/v4/data/entities/organizations/{company_permalink}"
+        # Extract query domain
+        query_domain = extract_domain(query)
+        logger.info(f"Query domain: {query_domain}")
         
-        params = {
-            "field_ids": [
-                "identifier",
-                "layout_id",
-                "facet_ids",
-                "title",
-                "short_description",
-                "is_locked",
-                "rank_delta_d90",
-                "investor_identifiers"
-            ],
-            "card_ids": [
-                "competitors_list",
-                "org_similarity_org_list",
-                "current_employees_summary",
-                "advisors_summary",
-                "alumni_summary",
-                "recommended_search"
-            ],
-            "layout_mode": "view_v3"
-        }
+        if not query_domain:
+            # If we can't extract a domain from query, return empty JSON
+            logger.info("Could not extract domain from query")
+            return {}
         
-        encoded_params = urllib.parse.urlencode({
-            "field_ids": json.dumps(params["field_ids"]),
-            "card_ids": json.dumps(params["card_ids"]),
-            "layout_mode": params["layout_mode"]
-        })
+        # Step 2: Loop through each entity and check if website domain matches
+        for entity in entities:
+            identifier = entity.get('identifier', {})
+            company_permalink = identifier.get('permalink')
+            
+            if not company_permalink:
+                logger.warning(f"Skipping entity without permalink: {entity.get('value', 'unknown')}")
+                continue
+            
+            logger.info(f"Checking entity with permalink: {company_permalink}")
+            
+            # Fetch detailed company information for this entity
+            base_url = f"https://www.crunchbase.com/v4/data/entities/organizations/{company_permalink}"
+            
+            params = {
+                "field_ids": [
+                    "identifier",
+                    "layout_id",
+                    "facet_ids",
+                    "title",
+                    "short_description",
+                    "is_locked",
+                    "rank_delta_d90",
+                    "investor_identifiers"
+                ],
+                "card_ids": [
+                    "competitors_list",
+                    "org_similarity_org_list",
+                    "current_employees_summary",
+                    "advisors_summary",
+                    "alumni_summary",
+                    "recommended_search",
+                    "company_about_fields2"
+                ],
+                "layout_mode": "view_v3"
+            }
+            
+            encoded_params = urllib.parse.urlencode({
+                "field_ids": json.dumps(params["field_ids"]),
+                "card_ids": json.dumps(params["card_ids"]),
+                "layout_mode": params["layout_mode"]
+            })
+            
+            url = f"{base_url}?{encoded_params}"
+            
+            try:
+                response = curl_requests.get(
+                    url,
+                    cookies=COOKIES,
+                    headers=HEADERS,
+                    impersonate="chrome",
+                    timeout=10
+                )
+                
+                if response.status_code != 200:
+                    logger.warning(f"Failed to fetch company details for {company_permalink}: {response.status_code}")
+                    continue
+                
+                # Parse the JSON response
+                company_data = response.json()
+                
+                # Get the website from company_about_fields2.website.value
+                cards = company_data.get("cards", {})
+                company_about = cards.get("company_about_fields2", {})
+                website_obj = company_about.get("website", {})
+                website_url = website_obj.get("value", "")
+                
+                if not website_url:
+                    logger.info(f"No website found for entity {company_permalink}")
+                    continue
+                
+                # Extract domain from website URL
+                website_domain = extract_domain(website_url)
+                logger.info(f"Entity {company_permalink} website domain: {website_domain}")
+                
+                # Compare query domain with website domain
+                if query_domain == website_domain:
+                    logger.info(f"Domain match found! Query domain '{query_domain}' matches website domain '{website_domain}' for entity {company_permalink}")
+                    return company_data
+                else:
+                    logger.info(f"Domain mismatch for {company_permalink}. Query: '{query_domain}', Website: '{website_domain}'")
+                    
+            except Exception as e:
+                logger.warning(f"Error fetching details for entity {company_permalink}: {str(e)}")
+                continue
         
-        url = f"{base_url}?{encoded_params}"
-        
-        logger.info(f"Fetching company details from: {url}")
-        response = curl_requests.get(
-            url,
-            cookies=COOKIES,
-            headers=HEADERS,
-            impersonate="chrome",
-        )
-        
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"Failed to fetch company details: {response.text}"
-            )
-        
-        # Parse and return the JSON response
-        company_data = response.json()
-        logger.info(f"Successfully fetched company information for: {query}")
-        
-        return company_data
+        # No match found across all entities
+        logger.info(f"No matching domain found. Query domain '{query_domain}' did not match any entity website domains.")
+        return {}
         
     except HTTPException:
         raise
