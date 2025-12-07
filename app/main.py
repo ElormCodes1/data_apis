@@ -21,6 +21,7 @@ from youtube_transcript_api import router as youtube_router
 from facebook_marketplace_router import router as facebook_marketplace_router
 from zillow_router import router as zillow_router
 from crunchbase_api import router as crunchbase_router
+from similarweb_api import router as similarweb_router
 
 # Configure logging
 logging.basicConfig(
@@ -57,6 +58,7 @@ app.include_router(youtube_router, prefix="/youtube", tags=["YouTube"])
 app.include_router(facebook_marketplace_router, prefix="/facebook-marketplace", tags=["Facebook Marketplace"])
 app.include_router(zillow_router, prefix="/zillow", tags=["Zillow Real Estate"])
 app.include_router(crunchbase_router, prefix="/crunchbase", tags=["Crunchbase"])
+app.include_router(similarweb_router, prefix="/similarweb", tags=["SimilarWeb"])
 
 # Health check endpoint
 @app.get("/")
@@ -76,6 +78,7 @@ async def root():
             "/facebook-marketplace - Facebook Marketplace Search",
             "/zillow - Zillow Real Estate Search (Sales & Rentals)",
             "/crunchbase - Crunchbase Company Information",
+            "/similarweb - SimilarWeb Website Analytics",
             "/docs - API Documentation",
             "/health - Health Check"
         ]
