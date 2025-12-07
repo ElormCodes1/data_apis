@@ -1643,7 +1643,7 @@ def scrape_category_products_task(task_id: str, category_slug: str, order: str =
             params = {
                 'operationName': 'CategoryPageQuery',
                 'variables': f'{{"featuredOnly":true,"slug":"{category_slug}","order":"{order}","page":{current_page},"pageSize":15,"tags":null,"includeRelevantReviews":false}}',
-                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"615e3ef56064f426acb56b7165ce62b4f99bae905c217c50cf9089988ba6780b"}}',
+                'extensions': '{"persistedQuery":{"version":1,"sha256Hash":"76a50014cb2ce4f3afc3fd8b20655645b8ef3a56435f99960214ab9c13714e44"}}',
             }
             
             base_url = 'https://www.producthunt.com/frontend/graphql'
