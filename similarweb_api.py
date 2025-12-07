@@ -596,10 +596,65 @@ async def get_website_info(
         result = get_website_data(domain, from_date, to_date)
         
         if not result or not result.get("domain"):
-            raise HTTPException(
-                status_code=404,
-                detail=f"No data found for domain: {domain}"
-            )
+            logger.info(f"No data found for domain: {domain}")
+            return {}
+        
+        # Check if we have meaningful non-zero data
+        traffic = result.get("traffic", {})
+        rankings = result.get("rankings", {})
+        engagement = result.get("engagement", {})
+        geography = result.get("geography", {})
+        referrals = result.get("referrals", {})
+        competitors = result.get("competitors", [])
+        
+        # Check for meaningful traffic data
+        has_traffic = (
+            traffic.get("totalVisits", 0) > 0 or
+            traffic.get("monthlyVisits", 0) > 0
+        )
+        
+        # Check for meaningful rankings
+        has_rankings = (
+            rankings.get("global", {}).get("rank", 0) > 0 or
+            rankings.get("country", {}).get("rank", 0) > 0 or
+            rankings.get("category", {}).get("rank", 0) > 0
+        )
+        
+        # Check for meaningful engagement
+        has_engagement = (
+            engagement.get("avgVisitDuration", 0) > 0 or
+            engagement.get("pagesPerVisit", 0) > 0 or
+            engagement.get("totalPageViews", 0) > 0
+        )
+        
+        # Check for geography data
+        has_geography = (
+            len(geography.get("topCountries", [])) > 0 or
+            geography.get("totalCountries", 0) > 0
+        )
+        
+        # Check for referrals
+        has_referrals = (
+            len(referrals.get("incoming", [])) > 0 or
+            len(referrals.get("outgoing", [])) > 0
+        )
+        
+        # Check for competitors
+        has_competitors = len(competitors) > 0
+        
+        # If all meaningful data is zero/empty, return empty dict
+        has_meaningful_data = (
+            has_traffic or
+            has_rankings or
+            has_engagement or
+            has_geography or
+            has_referrals or
+            has_competitors
+        )
+        
+        if not has_meaningful_data:
+            logger.info(f"No meaningful data found for domain: {domain} (all metrics are zero/empty)")
+            return {}
         
         logger.info(f"Successfully fetched data for {domain}")
         return JSONResponse(content=result)
