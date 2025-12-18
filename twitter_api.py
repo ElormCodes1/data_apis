@@ -2903,6 +2903,8 @@ async def search_tweets(
     - Each request returns only the results on the current page.
     - If there is another page, a `next_cursor` is returned.
     - The client can pass that `next_cursor` back in the next request to get the next page.
+    - Uses rotating proxies; if a page has no tweets and is not a real "No items found" page,
+      we retry with a new proxy until we either get data or hit the retry limit.
     """
     logger.info(f"🌐 /twitter/search (Nitter) - query='{query}', cursor='{cursor}'")
 
@@ -2916,255 +2918,303 @@ async def search_tweets(
     if cursor:
         params["cursor"] = cursor
 
-    logger.info(f"🔎 Nitter tweet search - fetching page with params={params}")
+    max_attempts = 25
+    last_error: str | None = None
 
-    # Use a rotated proxy for this Nitter request
-    proxies = get_next_nitter_proxy()
-    logger.info(f"🌐 Using Nitter proxy (tweets): {proxies['http']}")
+    final_tweets: List[Dict[str, Any]] = []
+    final_next_cursor: str | None = None
 
-    try:
-        response = curl_requests.get(
-            "https://nitter.net/search",
-            params=params,
-            impersonate="chrome",
-            proxies=proxies,
+    for attempt in range(1, max_attempts + 1):
+        logger.info(f"🔎 Nitter tweet search - attempt {attempt}/{max_attempts} with params={params}")
+
+        # Use a rotated proxy for this Nitter request
+        proxies = get_next_nitter_proxy()
+        logger.info(f"🌐 Using Nitter proxy (tweets): {proxies['http']}")
+
+        try:
+            response = curl_requests.get(
+                "https://nitter.net/search",
+                params=params,
+                impersonate="chrome",
+                proxies=proxies,
+                timeout=30,
+            )
+        except Exception as e:
+            last_error = f"Request error: {e}"
+            logger.warning(f"❌ Error calling Nitter for tweets on attempt {attempt}: {last_error}")
+            continue
+
+        if response.status_code != 200:
+            last_error = f"Non-200 status from Nitter: {response.status_code}"
+            logger.warning(f"⚠️ Attempt {attempt} returned status {response.status_code}")
+            continue
+
+        html = response.text
+
+        # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
+        logger.info(
+            "🌐 Nitter raw HTML (tweets) length=%s, snippet=%r",
+            len(html),
+            html[:500],
         )
-    except Exception as e:
-        logger.error(f"❌ Error calling Nitter for tweets: {e}")
-        raise HTTPException(status_code=502, detail="Error contacting Nitter for tweet search")
 
-    html = response.text
+        # Optional: keep last page HTML for debugging if needed on disk
+        with open("nitter.html", "w", encoding="utf-8") as f:
+            f.write(html)
 
-    # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
-    logger.info(
-        "🌐 Nitter raw HTML (tweets) length=%s, snippet=%r",
-        len(html),
-        html[:500],
-        "resonse status code", response.status_code
-    )
+        # If Nitter explicitly says "No items found", stop immediately and return empty result
+        if "No items found" in html:
+            logger.info("🛑 Nitter timeline reports 'No items found' – stopping without retries.")
+            final_tweets = []
+            final_next_cursor = None
+            break
 
-    # Optional: keep last page HTML for debugging if needed on disk
-    with open("nitter.html", "w", encoding="utf-8") as f:
-        f.write(html)
+        soup = BeautifulSoup(html, "html.parser")
 
-    soup = BeautifulSoup(html, "html.parser")
+        tweets: List[Dict[str, Any]] = []
+        page_tweet_count = 0
 
-    tweets: List[Dict[str, Any]] = []
-    page_tweet_count = 0
+        for item in soup.select("div.timeline-item[data-username]"):
+            username_slug = item.get("data-username")
 
-    for item in soup.select("div.timeline-item[data-username]"):
-        username_slug = item.get("data-username")
+            # Tweet link and IDs
+            tweet_link_tag = item.select_one("a.tweet-link")
+            tweet_path = tweet_link_tag.get("href") if tweet_link_tag else None  # e.g. "/user/status/123#m"
+            tweet_url = None
+            tweet_id = None
+            if tweet_path:
+                # Strip off any "#m" fragment
+                path_no_fragment = tweet_path.split("#", 1)[0]
+                tweet_url = f"https://x.com{path_no_fragment}"
+                # Extract tweet ID from "/{user}/status/{id}"
+                parts = path_no_fragment.split("/")
+                if "status" in parts:
+                    try:
+                        tweet_id = parts[parts.index("status") + 1]
+                    except (ValueError, IndexError):
+                        tweet_id = None
 
-        # Tweet link and IDs
-        tweet_link_tag = item.select_one("a.tweet-link")
-        tweet_path = tweet_link_tag.get("href") if tweet_link_tag else None  # e.g. "/user/status/123#m"
-        tweet_url = None
-        tweet_id = None
-        if tweet_path:
-            # Strip off any "#m" fragment
-            path_no_fragment = tweet_path.split("#", 1)[0]
-            tweet_url = f"https://x.com{path_no_fragment}"
-            # Extract tweet ID from "/{user}/status/{id}"
-            parts = path_no_fragment.split("/")
-            if "status" in parts:
-                try:
-                    tweet_id = parts[parts.index("status") + 1]
-                except (ValueError, IndexError):
-                    tweet_id = None
-
-        header = item.select_one("div.tweet-header")
-        if not header:
+            header = item.select_one("div.tweet-header")
+            if not header:
                 continue
-
-        # Handle / X screen name
-        profile_link_tag = header.select_one("a.username")
-        handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@user"
-        if handle_text and handle_text.startswith("@"):
-            screen_name = handle_text[1:]
-        else:
-            screen_name = username_slug
-
-        # X profile URL
-        profile_url = f"https://x.com/{screen_name}" if screen_name else None
-
-        # Display name (prefer title attribute to avoid inline icons)
-        fullname_tag = header.select_one("a.fullname")
-        if fullname_tag and fullname_tag.get("title"):
-            display_name = fullname_tag.get("title")
-        else:
-            display_name = fullname_tag.get_text(strip=True) if fullname_tag else None
-
-        # Verified badge
-        verified = bool(header.select_one(".verified-icon"))
-
-        # Timestamp
-        date_link = header.select_one("span.tweet-date a")
-        created_at = date_link.get("title") if date_link and date_link.get("title") else None
-        time_ago = date_link.get_text(strip=True) if date_link else None
-
-        # Retweet info
-        retweet_header = item.select_one("div.retweet-header")
-        retweeted_by = None
-        if retweet_header:
-            # Example text: "Some User retweeted"
-            retweet_text = retweet_header.get_text(" ", strip=True)
-            if "retweeted" in retweet_text:
-                retweeted_by = retweet_text.replace("retweeted", "").strip()
-
-        # Replying-to info – return X profile URLs instead of raw @handles
-        replying_to_tag = item.select_one("div.replying-to")
-        replying_to = None
-        if replying_to_tag:
-            urls: List[str] = []
-            for a in replying_to_tag.select("a"):
-                href = a.get("href")
-                if not href:
-                    continue
-                if href.startswith("/"):
-                    urls.append(f"https://x.com{href}")
-                else:
-                    urls.append(href)
-            replying_to = urls or None
-
-        # Main tweet text
-        content_tag = item.select_one("div.tweet-content.media-body")
-        text = content_tag.get_text(" ", strip=True) if content_tag else None
-
-        # Quoted tweet (if any)
-        quote_block = item.select_one("div.quote")
-        quoted_tweet_url = None
-        quoted_username = None
-        quoted_display_name = None
-        quoted_text = None
-        if quote_block:
-            quote_link = quote_block.select_one("a.quote-link")
-            quote_path = quote_link.get("href") if quote_link else None
-            if quote_path:
-                quoted_tweet_url = f"https://x.com{quote_path.split('#', 1)[0]}"
-
-            quote_header = quote_block.select_one("div.tweet-name-row")
-            if quote_header:
-                q_fullname = quote_header.select_one("a.fullname")
-                q_username = quote_header.select_one("a.username")
-                quoted_display_name = q_fullname.get("title") if q_fullname and q_fullname.get("title") else (
-                    q_fullname.get_text(strip=True) if q_fullname else None
-                )
-                if q_username:
-                    q_handle = q_username.get_text(strip=True)
-                    quoted_username = q_handle[1:] if q_handle.startswith("@") else q_handle
-
-            quote_text_tag = quote_block.select_one("div.quote-text")
-            quoted_text = quote_text_tag.get_text(" ", strip=True) if quote_text_tag else None
-
-        # Stats: replies, retweets, likes, views
-        stats_block = item.select_one("div.tweet-stats")
-        reply_count = retweet_count = like_count = view_count = None
-        if stats_block:
-            stat_spans = stats_block.select("span.tweet-stat")
-
-            def parse_count(span):
-                if not span:
-                    return None
-                txt = span.get_text(" ", strip=True).replace(",", "")
-                parts = [p for p in txt.split(" ") if p.replace(",", "").isdigit()]
-                if not parts:
-                    return None
-                try:
-                    return int(parts[-1])
-                except ValueError:
-                    return None
-
-            if len(stat_spans) > 0:
-                reply_count = parse_count(stat_spans[0])
-            if len(stat_spans) > 1:
-                retweet_count = parse_count(stat_spans[1])
-            if len(stat_spans) > 2:
-                like_count = parse_count(stat_spans[2])
-            if len(stat_spans) > 3:
-                view_count = parse_count(stat_spans[3])
-
-        # Media URLs in X format:
-        #   https://x.com/{screen_name}/status/{tweet_id}/photo/{index}
-        #   https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{index}
-        media_urls = []
-        quoted_media_urls = []
-
-        main_media_index = 1
-        quoted_media_index = 1
-        for img in item.select("div.attachments img"):
-            inside_quote = img.find_parent("div", class_="quote") is not None
-
-            if inside_quote and quoted_tweet_url and quoted_username:
-                quoted_tweet_id = None
-                try:
-                    q_path = quoted_tweet_url.split("https://x.com", 1)[-1]
-                    q_parts = q_path.strip("/").split("/")
-                    if "status" in q_parts:
-                        quoted_tweet_id = q_parts[q_parts.index("status") + 1]
-                except Exception:
-                    quoted_tweet_id = None
-
-                if quoted_tweet_id:
-                    q_url = f"https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{quoted_media_index}"
-                    quoted_media_urls.append(q_url)
-                    quoted_media_index += 1
+            
+            # Handle / X screen name
+            profile_link_tag = header.select_one("a.username")
+            handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@user"
+            if handle_text and handle_text.startswith("@"):
+                screen_name = handle_text[1:]
             else:
-                if tweet_id and screen_name:
-                    m_url = f"https://x.com/{screen_name}/status/{tweet_id}/photo/{main_media_index}"
-                    media_urls.append(m_url)
-                    main_media_index += 1
+                screen_name = username_slug
 
-        tweets.append(
-            {
-                "tweet_id": tweet_id,
-                "tweet_url": tweet_url,
-                "username": username_slug,
-                "screen_name": screen_name,
-                "name": display_name,
-                "verified": verified,
-                "profile_url": profile_url,
-                "text": text,
-                "created_at": created_at,
-                "time_ago": time_ago,
-                "retweeted_by": retweeted_by,
-                "replying_to": replying_to,
-                "reply_count": reply_count,
-                "retweet_count": retweet_count,
-                "like_count": like_count,
-                "view_count": view_count,
-                "media_urls": media_urls,
-                "quoted_media_urls": quoted_media_urls,
-                "quoted_tweet_url": quoted_tweet_url,
-                "quoted_username": quoted_username,
-                "quoted_name": quoted_display_name,
-                "quoted_text": quoted_text,
-            }
+            # X profile URL
+            profile_url = f"https://x.com/{screen_name}" if screen_name else None
+
+            # Display name (prefer title attribute to avoid inline icons)
+            fullname_tag = header.select_one("a.fullname")
+            if fullname_tag and fullname_tag.get("title"):
+                display_name = fullname_tag.get("title")
+            else:
+                display_name = fullname_tag.get_text(strip=True) if fullname_tag else None
+
+            # Verified badge
+            verified = bool(header.select_one(".verified-icon"))
+
+            # Timestamp
+            date_link = header.select_one("span.tweet-date a")
+            created_at = date_link.get("title") if date_link and date_link.get("title") else None
+            time_ago = date_link.get_text(strip=True) if date_link else None
+
+            # Retweet info
+            retweet_header = item.select_one("div.retweet-header")
+            retweeted_by = None
+            if retweet_header:
+                # Example text: "Some User retweeted"
+                retweet_text = retweet_header.get_text(" ", strip=True)
+                if "retweeted" in retweet_text:
+                    retweeted_by = retweet_text.replace("retweeted", "").strip()
+
+            # Replying-to info – return X profile URLs instead of raw @handles
+            replying_to_tag = item.select_one("div.replying-to")
+            replying_to = None
+            if replying_to_tag:
+                urls: List[str] = []
+                for a in replying_to_tag.select("a"):
+                    href = a.get("href")
+                    if not href:
+                        continue
+                    if href.startswith("/"):
+                        urls.append(f"https://x.com{href}")
+            else:
+                    urls.append(href)
+                    replying_to = urls or None
+
+            # Main tweet text
+            content_tag = item.select_one("div.tweet-content.media-body")
+            text = content_tag.get_text(" ", strip=True) if content_tag else None
+
+            # Quoted tweet (if any)
+            quote_block = item.select_one("div.quote")
+            quoted_tweet_url = None
+            quoted_username = None
+            quoted_display_name = None
+            quoted_text = None
+            if quote_block:
+                quote_link = quote_block.select_one("a.quote-link")
+                quote_path = quote_link.get("href") if quote_link else None
+                if quote_path:
+                    quoted_tweet_url = f"https://x.com{quote_path.split('#', 1)[0]}"
+
+                quote_header = quote_block.select_one("div.tweet-name-row")
+                if quote_header:
+                    q_fullname = quote_header.select_one("a.fullname")
+                    q_username = quote_header.select_one("a.username")
+                    quoted_display_name = q_fullname.get("title") if q_fullname and q_fullname.get("title") else (
+                        q_fullname.get_text(strip=True) if q_fullname else None
+                    )
+                    if q_username:
+                        q_handle = q_username.get_text(strip=True)
+                        quoted_username = q_handle[1:] if q_handle.startswith("@") else q_handle
+
+                quote_text_tag = quote_block.select_one("div.quote-text")
+                quoted_text = quote_text_tag.get_text(" ", strip=True) if quote_text_tag else None
+
+            # Stats: replies, retweets, likes, views
+            stats_block = item.select_one("div.tweet-stats")
+            reply_count = retweet_count = like_count = view_count = None
+            if stats_block:
+                stat_spans = stats_block.select("span.tweet-stat")
+
+                def parse_count(span):
+                    if not span:
+                        return None
+                    txt = span.get_text(" ", strip=True).replace(",", "")
+                    parts = [p for p in txt.split(" ") if p.replace(",", "").isdigit()]
+                    if not parts:
+                        return None
+                    try:
+                        return int(parts[-1])
+                    except ValueError:
+                        return None
+
+                if len(stat_spans) > 0:
+                    reply_count = parse_count(stat_spans[0])
+                if len(stat_spans) > 1:
+                    retweet_count = parse_count(stat_spans[1])
+                if len(stat_spans) > 2:
+                    like_count = parse_count(stat_spans[2])
+                if len(stat_spans) > 3:
+                    view_count = parse_count(stat_spans[3])
+
+            # Media URLs in X format:
+            #   https://x.com/{screen_name}/status/{tweet_id}/photo/{index}
+            #   https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{index}
+            media_urls = []
+            quoted_media_urls = []
+
+            main_media_index = 1
+            quoted_media_index = 1
+            for img in item.select("div.attachments img"):
+                inside_quote = img.find_parent("div", class_="quote") is not None
+
+                if inside_quote and quoted_tweet_url and quoted_username:
+                    quoted_tweet_id = None
+                    try:
+                        q_path = quoted_tweet_url.split("https://x.com", 1)[-1]
+                        q_parts = q_path.strip("/").split("/")
+                        if "status" in q_parts:
+                            quoted_tweet_id = q_parts[q_parts.index("status") + 1]
+                    except Exception:
+                        quoted_tweet_id = None
+
+                    if quoted_tweet_id:
+                        q_url = f"https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{quoted_media_index}"
+                        quoted_media_urls.append(q_url)
+                        quoted_media_index += 1
+                else:
+                    if tweet_id and screen_name:
+                        m_url = f"https://x.com/{screen_name}/status/{tweet_id}/photo/{main_media_index}"
+                        media_urls.append(m_url)
+                        main_media_index += 1
+
+            tweets.append(
+                {
+                    "tweet_id": tweet_id,
+                    "tweet_url": tweet_url,
+                    "username": username_slug,
+                    "screen_name": screen_name,
+                    "name": display_name,
+                    "verified": verified,
+                    "profile_url": profile_url,
+                    "text": text,
+                    "created_at": created_at,
+                    "time_ago": time_ago,
+                    "retweeted_by": retweeted_by,
+                    "replying_to": replying_to,
+                    "reply_count": reply_count,
+                    "retweet_count": retweet_count,
+                    "like_count": like_count,
+                    "view_count": view_count,
+                    "media_urls": media_urls,
+                    "quoted_media_urls": quoted_media_urls,
+                    "quoted_tweet_url": quoted_tweet_url,
+                    "quoted_username": quoted_username,
+                    "quoted_name": quoted_display_name,
+                    "quoted_text": quoted_text,
+                }
+            )
+
+            page_tweet_count += 1
+
+        logger.info(
+            f"📄 Nitter tweet search - parsed {page_tweet_count} tweets on this page "
+            f"(attempt {attempt}/{max_attempts})"
         )
 
-        page_tweet_count += 1
+        # If we got tweets, accept this page and compute next_cursor
+        if page_tweet_count > 0:
+            logger.info("✅ Successfully fetched tweets from Nitter, stopping retries.")
+            # Get next page URL via helper (if any)
+            next_cursor = None
+            next_page_url = get_next_page_url_from_soup(soup)
+            if next_page_url:
+                logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
+                parsed = urlparse(next_page_url)
+                qs = parse_qs(parsed.query)
+                cursor_vals = qs.get("cursor")
+                if cursor_vals:
+                    next_cursor = cursor_vals[0]
+                    logger.info(f"🔁 Next cursor: {next_cursor}")
+                else:
+                    logger.info("⏹ No cursor found in next page URL.")
+            else:
+                logger.info("⏹ No 'Load more' URL found - this is the last page.")
 
-    logger.info(f"📄 Nitter tweet search - parsed {page_tweet_count} tweets on this page")
+            final_tweets = tweets
+            final_next_cursor = next_cursor
+            break
 
-    # Get next page URL via helper (if any)
-    next_cursor = None
-    next_page_url = get_next_page_url_from_soup(soup)
-    if next_page_url:
-        logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
-        parsed = urlparse(next_page_url)
-        qs = parse_qs(parsed.query)
-        cursor_vals = qs.get("cursor")
-        if cursor_vals:
-            next_cursor = cursor_vals[0]
-            logger.info(f"🔁 Next cursor: {next_cursor}")
-        else:
-            logger.info("⏹ No cursor found in next page URL.")
-    else:
-        logger.info("⏹ No 'Load more' URL found - this is the last page.")
+        # If we got no tweets and no explicit "No items found", treat it as a bad/blocked page and retry
+        last_error = "No tweets found and no 'No items found' marker – likely a blocked or empty page."
+        logger.warning(
+            f"⚠️ Attempt {attempt} returned 0 tweets without 'No items found'; "
+            "retrying with a new proxy."
+        )
+
+    # If we exhausted all attempts without any decisive result, raise an error
+    if final_tweets == [] and final_next_cursor is None and last_error and "No items found" not in last_error:
+        logger.error(
+            f"❌ Unable to fetch tweets from Nitter after {max_attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to fetch tweets from Nitter after {max_attempts} attempts. Last error: {last_error}",
+        )
 
     # Return only this page's tweets and the cursor for the next page
     return {
-        "tweets": tweets,
-        "next_cursor": next_cursor,
+        "tweets": final_tweets,
+        "next_cursor": final_next_cursor,
     }
 
 
@@ -3192,103 +3242,151 @@ async def search_people(
     if cursor:
         params["cursor"] = cursor
 
-    logger.info(f"🔎 Nitter people search - fetching page with params={params}")
+    max_attempts = 25
+    last_error: str | None = None
 
-    proxies = get_next_nitter_proxy()
-    logger.info(f"🌐 Using Nitter proxy (people): {proxies['http']}")
+    final_users: List[Dict[str, Any]] = []
+    final_next_cursor: str | None = None
 
-    try:
-        response = curl_requests.get(
-            "https://nitter.net/search",
-            params=params,
-            impersonate="chrome",
-            proxies=proxies,
-        )
-    except Exception as e:
-        logger.error(f"❌ Error calling Nitter: {e}")
-        raise HTTPException(status_code=502, detail="Error contacting Nitter for people search")
+    for attempt in range(1, max_attempts + 1):
+        logger.info(f"🔎 Nitter people search - attempt {attempt}/{max_attempts} with params={params}")
 
-    html = response.text
+        proxies = get_next_nitter_proxy()
+        logger.info(f"🌐 Using Nitter proxy (people): {proxies['http']}")
 
-    # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
-    logger.info(
-        "🌐 Nitter raw HTML (people) length=%s, snippet=%r",
-        len(html),
-        html[:500],
-        "resonse status code", response.status_code
-    )
-    soup = BeautifulSoup(html, "html.parser")
+        try:
+            response = curl_requests.get(
+                "https://nitter.net/search",
+                params=params,
+                impersonate="chrome",
+                proxies=proxies,
+                timeout=30,
+            )
+        except Exception as e:
+            last_error = f"Request error: {e}"
+            logger.warning(f"❌ Error calling Nitter for people on attempt {attempt}: {last_error}")
+            continue
 
-    users: List[Dict[str, Any]] = []
-    page_user_count = 0
+        if response.status_code != 200:
+            last_error = f"Non-200 status from Nitter: {response.status_code}"
+            logger.warning(f"⚠️ Attempt {attempt} returned status {response.status_code}")
+            continue
 
-    for item in soup.select("div.timeline-item[data-username]"):
-        username_slug = item.get("data-username")
-        header = item.select_one("div.tweet-header")
-        if not header:
-                    continue
+        html = response.text
 
-        # Handle / X screen name
-        profile_link_tag = header.select_one("a.username")
-        handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@KwesiFCB"
-        if handle_text and handle_text.startswith("@"):
-            screen_name = handle_text[1:]
-        else:
-            screen_name = username_slug
-
-        # X profile and photo URLs
-        profile_url = f"https://x.com/{screen_name}" if screen_name else None
-        avatar_url = f"https://x.com/{screen_name}/photo" if screen_name else None
-
-        # Name (display name) - use title attribute to avoid verified icon text
-        fullname_tag = header.select_one("a.fullname")
-        if fullname_tag and fullname_tag.get("title"):
-            name = fullname_tag.get("title")
-        else:
-            name = fullname_tag.get_text(strip=True) if fullname_tag else None
-
-        # Verified badge
-        verified = bool(header.select_one(".verified-icon"))
-
-        # Description (bio)
-        bio_tag = item.select_one("div.tweet-content.media-body")
-        description = bio_tag.get_text(" ", strip=True) if bio_tag else None
-
-        users.append(
-            {
-                "username": username_slug,    # slug without @
-                "name": name,                 # display name
-                "verified": verified,
-                "description": description,
-                "profile_url": profile_url,   # e.g. https://x.com/pyquantnews
-                "avatar_url": avatar_url,     # e.g. https://x.com/pyquantnews/photo
-            }
+        # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
+        logger.info(
+            "🌐 Nitter raw HTML (people) length=%s, snippet=%r",
+            len(html),
+            html[:500],
         )
 
-        page_user_count += 1
+        # If Nitter explicitly says "No items found", stop immediately and return empty result
+        if "No items found" in html:
+            logger.info("🛑 Nitter people timeline reports 'No items found' – stopping without retries.")
+            final_users = []
+            final_next_cursor = None
+            break
 
-    logger.info(f"📄 Nitter people search - parsed {page_user_count} users on this page")
+        soup = BeautifulSoup(html, "html.parser")
 
-    # Get next page URL via helper (if any)
-    next_cursor = None
-    next_page_url = get_next_page_url_from_soup(soup)
-    if next_page_url:
-        logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
-        parsed = urlparse(next_page_url)
-        qs = parse_qs(parsed.query)
-        cursor_vals = qs.get("cursor")
-        if cursor_vals:
-            next_cursor = cursor_vals[0]
-            logger.info(f"🔁 Next cursor: {next_cursor}")
-        else:
-            logger.info("⏹ No cursor found in next page URL.")
-    else:
-        logger.info("⏹ No 'Load more' URL found - this is the last page.")
+        users: List[Dict[str, Any]] = []
+        page_user_count = 0
+
+        for item in soup.select("div.timeline-item[data-username]"):
+            username_slug = item.get("data-username")
+            header = item.select_one("div.tweet-header")
+            if not header:
+                continue
+
+            # Handle / X screen name
+            profile_link_tag = header.select_one("a.username")
+            handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@KwesiFCB"
+            if handle_text and handle_text.startswith("@"):
+                screen_name = handle_text[1:]
+            else:
+                screen_name = username_slug
+
+            # X profile and photo URLs
+            profile_url = f"https://x.com/{screen_name}" if screen_name else None
+            avatar_url = f"https://x.com/{screen_name}/photo" if screen_name else None
+
+            # Name (display name) - use title attribute to avoid verified icon text
+            fullname_tag = header.select_one("a.fullname")
+            if fullname_tag and fullname_tag.get("title"):
+                name = fullname_tag.get("title")
+            else:
+                name = fullname_tag.get_text(strip=True) if fullname_tag else None
+
+            # Verified badge
+            verified = bool(header.select_one(".verified-icon"))
+
+            # Description (bio)
+            bio_tag = item.select_one("div.tweet-content.media-body")
+            description = bio_tag.get_text(" ", strip=True) if bio_tag else None
+
+            users.append(
+                {
+                    "username": username_slug,    # slug without @
+                    "name": name,                 # display name
+                    "verified": verified,
+                    "description": description,
+                    "profile_url": profile_url,   # e.g. https://x.com/pyquantnews
+                    "avatar_url": avatar_url,     # e.g. https://x.com/pyquantnews/photo
+                }
+            )
+
+            page_user_count += 1
+
+        logger.info(
+            f"📄 Nitter people search - parsed {page_user_count} users on this page "
+            f"(attempt {attempt}/{max_attempts})"
+        )
+
+        # If we got users, accept this page and compute next_cursor
+        if page_user_count > 0:
+            logger.info("✅ Successfully fetched people results from Nitter, stopping retries.")
+            next_cursor = None
+            next_page_url = get_next_page_url_from_soup(soup)
+            if next_page_url:
+                logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
+                parsed = urlparse(next_page_url)
+                qs = parse_qs(parsed.query)
+                cursor_vals = qs.get("cursor")
+                if cursor_vals:
+                    next_cursor = cursor_vals[0]
+                    logger.info(f"🔁 Next cursor: {next_cursor}")
+                else:
+                    logger.info("⏹ No cursor found in next page URL.")
+            else:
+                logger.info("⏹ No 'Load more' URL found - this is the last page.")
+
+            final_users = users
+            final_next_cursor = next_cursor
+            break
+
+        # If we got no users and no explicit "No items found", treat it as a bad/blocked page and retry
+        last_error = "No users found and no 'No items found' marker – likely a blocked or empty page."
+        logger.warning(
+            f"⚠️ Attempt {attempt} returned 0 users without 'No items found'; "
+            "retrying with a new proxy."
+        )
+
+    # If we exhausted all attempts without any decisive result, raise an error
+    if final_users == [] and final_next_cursor is None and last_error and "No items found" not in last_error:
+        logger.error(
+            f"❌ Unable to fetch people results from Nitter after {max_attempts} attempts. "
+            f"Last error: {last_error}"
+        )
+        raise HTTPException(
+            status_code=502,
+            detail=f"Unable to fetch people results from Nitter after {max_attempts} attempts. Last error: {last_error}",
+        )
 
     # Return only this page's users and the cursor for the next page
     return {
-        "users": users,
-        "next_cursor": next_cursor,
+        "users": final_users,
+        "next_cursor": final_next_cursor,
     }
 
 
