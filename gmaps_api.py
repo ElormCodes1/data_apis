@@ -977,10 +977,10 @@ def scrape_businesses_task(task_id: str, request: ScrapeRequest):
         )
 
 # API Endpoints
-@router.get("/", summary="API Information")
+@router.get("/about", summary="API Information")
 async def get_api_info():
     """Get Google Maps scraper API information"""
-    logger.info("🌐 API ENDPOINT: / (API Info)")
+    logger.info("🌐 API ENDPOINT: /about (API Info)")
     logger.info("📥 API information request received")
 
     # Inline health status information (previously returned by /health)
@@ -996,6 +996,7 @@ async def get_api_info():
         "service": "Google Maps Business Scraper API",
         "version": "1.0.0",
         "endpoints": {
+            "/about": "Google Maps API information",
             "/search": "Start business scraping (asynchronous)",
             "/result/{task_id}": "Get task status or paginated scraping results",
             "/download/{task_id}": "Download full results as JSON or CSV file",
