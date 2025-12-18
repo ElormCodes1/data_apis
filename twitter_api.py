@@ -20,6 +20,10 @@ from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
 import curl_cffi
 from urllib.parse import urlparse, parse_qs
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
 
 
 # Configure logging
@@ -2855,6 +2859,39 @@ def get_next_page_url_from_soup(soup: BeautifulSoup):
     return None
 
 
+# Proxy rotation for Nitter (generated on the fly using the same pattern as proxies_new.txt)
+PROXY_HOST = "p.webshare.io"
+PROXY_PORT = 80
+PROXY_USER_PREFIX = "vuidbdcu-"
+PROXY_PASSWORD = os.getenv("PROXY_PASSWORD")
+print("PROXY_PASSWORD", PROXY_PASSWORD)
+PROXY_COUNT = 1000  # vuidbdcu-1 ... vuidbdcu-1000
+_nitter_proxy_index = 0
+
+
+def get_next_nitter_proxy() -> Dict[str, str]:
+    """
+    Get the next proxy in sequence for Nitter requests.
+    
+    Proxies are generated on the fly using the pattern:
+      p.webshare.io:80:vuidbdcu-{n}:lt12nel60x4y
+    
+    Each call advances the index; when we reach PROXY_COUNT we wrap to 1 again.
+    """
+    global _nitter_proxy_index
+
+    proxy_num = (_nitter_proxy_index % PROXY_COUNT) + 1
+    _nitter_proxy_index += 1
+
+    username = f"{PROXY_USER_PREFIX}{proxy_num}"
+    url = f"http://{username}:{PROXY_PASSWORD}@{PROXY_HOST}:{PROXY_PORT}"
+
+    return {
+        "http": url,
+        "https": url,
+    }
+
+
 @router.get("/search")
 async def search_tweets(
     query: str = Query(..., description="Search tweets query (via Nitter HTML)"),
@@ -2881,11 +2918,16 @@ async def search_tweets(
 
     logger.info(f"🔎 Nitter tweet search - fetching page with params={params}")
 
+    # Use a rotated proxy for this Nitter request
+    proxies = get_next_nitter_proxy()
+    logger.info(f"🌐 Using Nitter proxy (tweets): {proxies['http']}")
+
     try:
         response = curl_cffi.get(
             "https://nitter.net/search",
             params=params,
             impersonate="chrome",
+            proxies=proxies,
         )
     except Exception as e:
         logger.error(f"❌ Error calling Nitter for tweets: {e}")
@@ -3136,11 +3178,30 @@ async def search_people(
 
     logger.info(f"🔎 Nitter people search - fetching page with params={params}")
 
+    proxies = get_next_nitter_proxy()
+    logger.info(f"🌐 Using Nitter proxy: {proxies['http']}")
+
     try:
         response = curl_cffi.get(
             "https://nitter.net/search",
             params=params,
             impersonate="chrome",
+            proxies=proxies,
+        )
+    except Exception as e:
+        logger.error(f"❌ Error calling Nitter: {e}")
+        raise HTTPException(status_code=502, detail="Error contacting Nitter for people search")
+    logger.info(f"🔎 Nitter people search - fetching page with params={params}")
+
+    proxies = get_next_nitter_proxy()
+    logger.info(f"🌐 Using Nitter proxy: {proxies['http']}")
+
+    try:
+        response = curl_cffi.get(
+            "https://nitter.net/search",
+            params=params,
+            impersonate="chrome",
+            proxies=proxies,
         )
     except Exception as e:
         logger.error(f"❌ Error calling Nitter: {e}")
