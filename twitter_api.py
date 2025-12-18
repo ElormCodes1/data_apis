@@ -18,7 +18,7 @@ from datetime import datetime
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
-import curl_cffi
+from curl_cffi import requests as curl_requests
 from urllib.parse import urlparse, parse_qs
 import os
 from dotenv import load_dotenv
@@ -2923,7 +2923,7 @@ async def search_tweets(
     logger.info(f"🌐 Using Nitter proxy (tweets): {proxies['http']}")
 
     try:
-        response = curl_cffi.get(
+        response = curl_requests.get(
             "https://nitter.net/search",
             params=params,
             impersonate="chrome",
@@ -3003,12 +3003,20 @@ async def search_tweets(
             if "retweeted" in retweet_text:
                 retweeted_by = retweet_text.replace("retweeted", "").strip()
 
-        # Replying-to info
+        # Replying-to info – return X profile URLs instead of raw @handles
         replying_to_tag = item.select_one("div.replying-to")
         replying_to = None
         if replying_to_tag:
-            handles = [a.get_text(strip=True) for a in replying_to_tag.select("a")]
-            replying_to = handles or replying_to_tag.get_text(" ", strip=True)
+            urls: List[str] = []
+            for a in replying_to_tag.select("a"):
+                href = a.get("href")
+                if not href:
+                    continue
+                if href.startswith("/"):
+                    urls.append(f"https://x.com{href}")
+                else:
+                    urls.append(href)
+            replying_to = urls or None
 
         # Main tweet text
         content_tag = item.select_one("div.tweet-content.media-body")
@@ -3179,25 +3187,10 @@ async def search_people(
     logger.info(f"🔎 Nitter people search - fetching page with params={params}")
 
     proxies = get_next_nitter_proxy()
-    logger.info(f"🌐 Using Nitter proxy: {proxies['http']}")
+    logger.info(f"🌐 Using Nitter proxy (people): {proxies['http']}")
 
     try:
-        response = curl_cffi.get(
-            "https://nitter.net/search",
-            params=params,
-            impersonate="chrome",
-            proxies=proxies,
-        )
-    except Exception as e:
-        logger.error(f"❌ Error calling Nitter: {e}")
-        raise HTTPException(status_code=502, detail="Error contacting Nitter for people search")
-    logger.info(f"🔎 Nitter people search - fetching page with params={params}")
-
-    proxies = get_next_nitter_proxy()
-    logger.info(f"🌐 Using Nitter proxy: {proxies['http']}")
-
-    try:
-        response = curl_cffi.get(
+        response = curl_requests.get(
             "https://nitter.net/search",
             params=params,
             impersonate="chrome",
