@@ -18,6 +18,8 @@ from datetime import datetime
 from typing import Dict, Any, List
 from pydantic import BaseModel, Field
 from concurrent.futures import ThreadPoolExecutor
+import curl_cffi
+from urllib.parse import urlparse, parse_qs
 
 
 # Configure logging
@@ -1290,6 +1292,9 @@ async def profile_info(username: str = Query(..., description="account username"
         cookies=cookies,
         headers=headers,
     )
+
+    # with open('followers_response.json', 'w') as f:
+    #     json.dump(response.json(), f)
     # response = requests.get(
     #     'https://x.com/i/api/graphql/32pL5BWe9WKeSK1MoPvFQQ/UserByScreenName',
     #     params=params,
@@ -1305,6 +1310,19 @@ async def profile_info(username: str = Query(..., description="account username"
         name = response.json()["data"]["user"]["result"]["core"]["name"]
     except:
         name = ""
+    try:
+        created_at = response.json()["data"]["user"]["result"]["core"]["created_at"]
+    except:
+        created_at = ""
+    try:
+        is_blue_verified = response.json()["data"]["user"]["result"]["is_blue_verified"]
+    except:
+        is_blue_verified = False
+    try:
+        verified_since = response.json()["data"]["user"]["result"]["verification_info"]["reason"]["verified_since_msec"]
+        verified_since = datetime.fromtimestamp(int(verified_since) / 1000).strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        verified_since = ""
     try:
         user_name = response.json()["data"]["user"]["result"]["core"]["screen_name"]
     except:
@@ -1354,6 +1372,9 @@ async def profile_info(username: str = Query(..., description="account username"
         "name": name,
         "user_name": user_name,
         "description": description,
+        "created_at": created_at,
+        "is_blue_verified": is_blue_verified,
+        "verified_since": verified_since,
         "followers_count": followers,
         "following_count": following,
         "avatar_image": avatar_image,
@@ -1506,6 +1527,9 @@ async def get_followers(username: str = Query(..., description="account username
         headers=headers,
     )
 
+    # with open('followers_response.json', 'w') as f:
+    #     json.dump(response.json(), f)
+
     # json_data = json.loads(response.text)
 
     data = response.json()
@@ -1525,6 +1549,14 @@ async def get_followers(username: str = Query(..., description="account username
                     user_result = content["itemContent"]["user_results"]["result"]
                 except:
                     continue
+                try:
+                    created_at = user_result["core"]["created_at"]
+                except:
+                    created_at = ""
+                try:
+                    is_verified = user_result["is_blue_verified"]
+                except:
+                    is_verified = False
                 try:
                     name = user_result["core"]["name"]
                 except:
@@ -1561,6 +1593,8 @@ async def get_followers(username: str = Query(..., description="account username
                 # print("-------------------------")
                 full_data = {
                     "follower_name": name,
+                    "created_at": created_at,
+                    "is_verified": is_verified,
                     "followers_count": followers_count,
                     "following_count": friends_count,
                     "description": description,
@@ -2468,487 +2502,885 @@ async def get_profile_posts(
     }
 
 
+# @router.get("/search")
+# async def search_tweets(
+#     query: str = Query(..., description="search query"),
+#     result_type: str = Query("Top", description="Search result type: 'Top' (popular) or 'Latest' (recent)"),
+#     cursor: str = Query(None, description="pagination cursor (from previous response)")
+# ):
+#     cookies = {
+#         'guest_id': 'v1%3A171353782335253191',
+#         'twid': 'u%3D1663936852208898049',
+#         'auth_token': 'b27ab02b6fbcf00d1db8e7bf1a319d973084924b',
+#         'guest_id_ads': 'v1%3A171353782335253191',
+#         'guest_id_marketing': 'v1%3A171353782335253191',
+#         'ct0': '52d09056b351acee0d101bbf7949c3f45be213602e00f6241942e4b963a61e471032b0d0db10318ac97d8b6c5c302bb4936c21d8dd39f3ef0ed3d1e3467c2fd79b1e34ee44fdbcd8510bf5a82f158376',
+#         'lang': 'en',
+#         'd_prefs': 'MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw',
+#         'personalization_id': '"v1_WUjf0NUgaPWRX4efQJqAqA=="',
+#     }
+
+#     headers = {
+#         'accept': '*/*',
+#         'accept-language': 'en-US,en;q=0.5',
+#         'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+#         'content-type': 'application/json',
+#         'priority': 'u=1, i',
+#         'referer': 'https://x.com',
+#         'sec-ch-ua': '"Brave";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+#         'sec-ch-ua-mobile': '?0',
+#         'sec-ch-ua-platform': '"Linux"',
+#         'sec-fetch-dest': 'empty',
+#         'sec-fetch-mode': 'cors',
+#         'sec-fetch-site': 'same-origin',
+#         'sec-gpc': '1',
+#         'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+#         'x-client-transaction-id': 'g7kus5wNnyIeKG8Dn68Bv5stgeTu4k4VYskkPw21zMuc1oE59rpwZrX4YtAHV3HIL5sZroC7n1uryGd3nqsgM0/KLnK7gA',
+#         'x-client-uuid': '9f4dfd05-5b66-4fe5-ac75-c6910297f088',
+#         'x-csrf-token': '52d09056b351acee0d101bbf7949c3f45be213602e00f6241942e4b963a61e471032b0d0db10318ac97d8b6c5c302bb4936c21d8dd39f3ef0ed3d1e3467c2fd79b1e34ee44fdbcd8510bf5a82f158376',
+#         'x-twitter-active-user': 'yes',
+#         'x-twitter-auth-type': 'OAuth2Session',
+#         'x-twitter-client-language': 'en',
+#     }
+
+#     # Validate result_type parameter
+#     if result_type not in ["Top", "Latest"]:
+#         raise HTTPException(status_code=400, detail="result_type must be either 'Top' or 'Latest'")
+
+#     url = f'https://x.com/i/api/graphql/BkkaU7QQGQBGnYgk4pKh4g/SearchTimeline'
+#     variables = {
+#         "rawQuery": query,
+#         "count": 100,
+#         "querySource": "typed_query",
+#         "product": result_type
+#     }
+    
+#     # Add cursor if provided
+#     if cursor:
+#         variables["cursor"] = cursor
+#         print(f"Using provided cursor: {cursor}")
+#     features = {
+#         "responsive_web_grok_share_attachment_enabled": False,
+#         "freedom_of_speech_not_reach_fetch_enabled": True,
+#         "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+#         "responsive_web_twitter_article_tweet_consumption_enabled": True,
+#         "rweb_tipjar_consumption_enabled": True,
+#         "profile_label_improvements_pcf_label_in_post_enabled": False,
+#         "longform_notetweets_rich_text_read_enabled": True,
+#         "standardized_nudges_misinfo": True,
+#         "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+#         "responsive_web_grok_analyze_post_followups_enabled": True,
+#         "premium_content_api_read_enabled": False,
+#         "rweb_video_timestamps_enabled": True,
+#         "responsive_web_enhance_cards_enabled": False,
+#         "longform_notetweets_inline_media_enabled": True,
+#         "communities_web_enable_tweet_community_results_fetch": True,
+#         "verified_phone_label_enabled": False,
+#         "creator_subscriptions_tweet_preview_api_enabled": True,
+#         "c9s_tweet_anatomy_moderator_badge_enabled": True,
+#         "responsive_web_edit_tweet_api_enabled": True,
+#         "view_counts_everywhere_api_enabled": True,
+#         "tweet_awards_web_tipping_enabled": False,
+#         "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+#         "articles_preview_enabled": True,
+#         "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+#         "creator_subscriptions_quote_tweet_preview_enabled": False,
+#         "longform_notetweets_consumption_enabled": True,
+#         "responsive_web_graphql_exclude_directive_enabled": True,
+#         "responsive_web_graphql_timeline_navigation_enabled": True,
+#     }
+#     params = {
+#         'variables': json.dumps(variables),
+#         'features': json.dumps(features),
+#     }
+
+#     response = requests.get(url, cookies=cookies, headers=headers, params=params)
+#     try:
+#         data = response.json()
+#     except:
+#         raise HTTPException(status_code=500, detail="Could not extract posts from Twitter API response")
+#     # print(f"THIS IS THE DATA: {data}")
+
+#     # if result_type == "Latest":
+#     #     try:
+#     #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
+#     #     except:
+#     #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
+#     # elif result_type == "Top":
+#     #     try:
+#     #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
+#     #     except:
+#     #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
+#     posts = next(
+#                 (entry["entries"] for entry in data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"] 
+#                 if entry["type"] == "TimelineAddEntries"), 
+#                 []
+#             )
+
+#     # Extract cursor for next page (Bottom cursor)
+#     next_cursor = None
+#     for entry in posts:
+#         if entry.get("content", {}).get("entryType") == "TimelineTimelineCursor":
+#             cursor_type = entry["content"].get("cursorType")
+#             if cursor_type == "Bottom":
+#                 next_cursor = entry["content"]["value"]
+#                 break
+#     if next_cursor:
+#         print(f"Next cursor to return: {next_cursor}")
+
+#     # Filter out cursor entries from posts processing
+#     actual_posts = [entry for entry in posts if entry.get("content", {}).get("entryType") != "TimelineTimelineCursor"]
+
+#     posts_list = []
+
+#     for entries in actual_posts:
+#         if "tweet-" not in entries["entryId"]:
+#             continue
+        
+#         # Check if this entry actually has tweet data
+#         try:
+#             content = entries.get("content", {})
+#             item_content = content.get("itemContent", {})
+#             if "tweet_results" not in item_content:
+#                 continue
+#         except:
+#             continue
+            
+#         # post_url = entries["entryId"]
+#         try:
+#             entriess = entries["content"]["items"]
+#             # print(len(entriess))
+#         except:
+#             entriess = []
+#             # print(f"len of entriesss {len(entriess)}")
+#             # print(len(entriess)==0)
+#         if len(entriess) == 0:
+#             # Try multiple possible structures for username
+#             username = None
+#             try:
+#                 # New structure: core -> user_results -> result -> legacy -> screen_name
+#                 username = entries["content"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+#             except:
+#                 try:
+#                     # Old structure: direct legacy -> screen_name
+#                     username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["screen_name"]
+#                 except:
+#                     try:
+#                         # Alternative structure: legacy -> user -> screen_name
+#                         username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user"]["screen_name"]
+#                     except:
+#                         # If all fail, try to extract from user_id_str or other fields
+#                         try:
+#                             user_id = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user_id_str"]
+#                             username = f"user_{user_id}"
+#                         except:
+#                             username = "unknown_user"
+#             post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
+#             try:
+#                 views = entries["content"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
+#             except:
+#                 views = None
+#             try:
+#                 bookmarks = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
+#             except:
+#                 bookmarks = None
+#             try:
+#                 tweet_date = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
+#             except:
+#                 tweet_date = None
+#             if tweet_date is None:
+#                 continue
+#             try:
+#                 media_type = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
+#             except:
+#                 media_type = None
+#             try:
+#                 likes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
+#             except:
+#                 likes =None
+#             try:
+#                 tweet_text = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
+#                 if "RT @" in tweet_text:
+#                     isretweet = True
+#                 else:
+#                     isretweet = False
+#             except:
+#                 tweet_text = None
+#             try:
+#                 quotes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
+#             except:
+#                 quotes = None
+#             try:
+#                 replies = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
+#             except:
+#                 replies = None
+#             try:
+#                 retweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
+#             except:
+#                 retweet =  None
+#             try:
+#                 quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
+#             except:
+#                 quoted_tweet = None
+#             try:
+#                 url = post_url
+#             except:
+#                 url = None
+
+#             data = {
+#                 "views": views,
+#                 "bookmarks": bookmarks,
+#                 "tweet_date": tweet_date,
+#                 "media_type": media_type,
+#                 "likes": likes,
+#                 "tweet_text": tweet_text,
+#                 "quotes": quotes,
+#                 "replies": replies,
+#                 "retweetc": retweet,
+#                 "thread_tweet": False,
+#                 "quoted_tweet": quoted_tweet,
+#                 "isRetweet": isretweet,
+#                 "url": url
+#             }
+#             posts_list.append(data)
+#             print(data)
+
+#         else:
+#             for entry in entriess:
+#                 username = entry["item"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
+#                 post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
+#                 try:
+#                     views = entry["item"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
+#                 except:
+#                     views = None
+#                 try:
+#                     bookmarks = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
+#                 except:
+#                     bookmarks = None
+#                 try:
+#                     tweet_date = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
+#                 except:
+#                     tweet_date = None
+#                 if tweet_date is None:
+#                     continue
+#                 try:
+#                     media_type = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
+#                 except:
+#                     media_type = None
+#                 try:
+#                     likes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
+#                 except:
+#                     likes =None
+#                 try:
+#                     tweet_text = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
+#                     if "RT @" in tweet_text:
+#                         isretweet = True
+#                     else:
+#                         isretweet = False
+#                 except:
+#                     tweet_text = None
+#                 try:
+#                     quotes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
+#                 except:
+#                     quotes = None
+#                 try:
+#                     replies = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
+#                 except:
+#                     replies = None
+#                 try:
+#                     retweet = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
+#                 except:
+#                     retweet =  None
+#                 try:
+#                     quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
+#                 except:
+#                     quoted_tweet = None
+#                 try:
+#                     url = post_url
+#                 except:
+#                     url = None
+                
+#                 data = {
+#                     "views": views,
+#                     "bookmarks": bookmarks,
+#                     "tweet_date": tweet_date,
+#                     "media_type": media_type,
+#                     "likes": likes,
+#                     "tweet_text": tweet_text,
+#                     "quotes": quotes,
+#                     "replies": replies,
+#                     "retweetc": retweet,
+#                     "quoted_tweet": quoted_tweet,
+#                     "thread_tweet": True,
+#                     "isRetweet": isretweet,
+#                     "url": url
+#                 }
+#                 posts_list.append(data)
+#                 print(data)
+    
+#     return {
+#         "posts": posts_list,
+#         "next_cursor": next_cursor,
+#         "has_more": next_cursor is not None,
+#         "total_results": len(posts_list)
+#     }
+
+
+def get_next_page_url_from_soup(soup: BeautifulSoup):
+    """
+    Get the next page URL from the 'Load more' link on a Nitter search page.
+    
+    This mimics the Playwright helper:
+      - Find all '.show-more a' links
+      - Pick the one with text 'Load more'
+      - Normalize relative hrefs to full https://nitter.net URLs
+    """
+    all_show_more_links = soup.select(".show-more a")
+
+    for link in all_show_more_links:
+        if link.get_text(strip=True) == "Load more":
+            href = link.get("href")
+            if not href:
+                return None
+
+            # If href starts with '/', it's an absolute path, use it as is
+            # If href starts with '?', append it to the base search URL
+            if href.startswith("/"):
+                return f"https://nitter.net{href}"
+            elif href.startswith("?"):
+                return f"https://nitter.net/search{href}"
+
+            return href
+
+    return None
+
+
 @router.get("/search")
 async def search_tweets(
-    query: str = Query(..., description="search query"),
-    result_type: str = Query("Top", description="Search result type: 'Top' (popular) or 'Latest' (recent)"),
-    cursor: str = Query(None, description="pagination cursor (from previous response)")
+    query: str = Query(..., description="Search tweets query (via Nitter HTML)"),
+    cursor: str = Query(None, description="Pagination cursor (from previous response)"),
 ):
-    cookies = {
-        'guest_id': 'v1%3A171353782335253191',
-        'twid': 'u%3D1663936852208898049',
-        'auth_token': 'b27ab02b6fbcf00d1db8e7bf1a319d973084924b',
-        'guest_id_ads': 'v1%3A171353782335253191',
-        'guest_id_marketing': 'v1%3A171353782335253191',
-        'ct0': '52d09056b351acee0d101bbf7949c3f45be213602e00f6241942e4b963a61e471032b0d0db10318ac97d8b6c5c302bb4936c21d8dd39f3ef0ed3d1e3467c2fd79b1e34ee44fdbcd8510bf5a82f158376',
-        'lang': 'en',
-        'd_prefs': 'MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw',
-        'personalization_id': '"v1_WUjf0NUgaPWRX4efQJqAqA=="',
-    }
-
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.5',
-        'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-        'content-type': 'application/json',
-        'priority': 'u=1, i',
-        'referer': 'https://x.com',
-        'sec-ch-ua': '"Brave";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Linux"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'sec-gpc': '1',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        'x-client-transaction-id': 'g7kus5wNnyIeKG8Dn68Bv5stgeTu4k4VYskkPw21zMuc1oE59rpwZrX4YtAHV3HIL5sZroC7n1uryGd3nqsgM0/KLnK7gA',
-        'x-client-uuid': '9f4dfd05-5b66-4fe5-ac75-c6910297f088',
-        'x-csrf-token': '52d09056b351acee0d101bbf7949c3f45be213602e00f6241942e4b963a61e471032b0d0db10318ac97d8b6c5c302bb4936c21d8dd39f3ef0ed3d1e3467c2fd79b1e34ee44fdbcd8510bf5a82f158376',
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en',
-    }
-
-    # Validate result_type parameter
-    if result_type not in ["Top", "Latest"]:
-        raise HTTPException(status_code=400, detail="result_type must be either 'Top' or 'Latest'")
-
-    url = f'https://x.com/i/api/graphql/BkkaU7QQGQBGnYgk4pKh4g/SearchTimeline'
-    variables = {
-        "rawQuery": query,
-        "count": 100,
-        "querySource": "typed_query",
-        "product": result_type
-    }
+    """
+    Search for tweets on X (Twitter) using Nitter HTML, one page at a time.
     
-    # Add cursor if provided
+    - Each request returns only the results on the current page.
+    - If there is another page, a `next_cursor` is returned.
+    - The client can pass that `next_cursor` back in the next request to get the next page.
+    """
+    logger.info(f"🌐 /twitter/search (Nitter) - query='{query}', cursor='{cursor}'")
+
+    base_params = {
+        "f": "tweets",
+        "q": query,
+    }
+
+    # Build params for this page
+    params = dict(base_params)
     if cursor:
-        variables["cursor"] = cursor
-        print(f"Using provided cursor: {cursor}")
-    features = {
-        "responsive_web_grok_share_attachment_enabled": False,
-        "freedom_of_speech_not_reach_fetch_enabled": True,
-        "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
-        "responsive_web_twitter_article_tweet_consumption_enabled": True,
-        "rweb_tipjar_consumption_enabled": True,
-        "profile_label_improvements_pcf_label_in_post_enabled": False,
-        "longform_notetweets_rich_text_read_enabled": True,
-        "standardized_nudges_misinfo": True,
-        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
-        "responsive_web_grok_analyze_post_followups_enabled": True,
-        "premium_content_api_read_enabled": False,
-        "rweb_video_timestamps_enabled": True,
-        "responsive_web_enhance_cards_enabled": False,
-        "longform_notetweets_inline_media_enabled": True,
-        "communities_web_enable_tweet_community_results_fetch": True,
-        "verified_phone_label_enabled": False,
-        "creator_subscriptions_tweet_preview_api_enabled": True,
-        "c9s_tweet_anatomy_moderator_badge_enabled": True,
-        "responsive_web_edit_tweet_api_enabled": True,
-        "view_counts_everywhere_api_enabled": True,
-        "tweet_awards_web_tipping_enabled": False,
-        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
-        "articles_preview_enabled": True,
-        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-        "creator_subscriptions_quote_tweet_preview_enabled": False,
-        "longform_notetweets_consumption_enabled": True,
-        "responsive_web_graphql_exclude_directive_enabled": True,
-        "responsive_web_graphql_timeline_navigation_enabled": True,
-    }
-    params = {
-        'variables': json.dumps(variables),
-        'features': json.dumps(features),
-    }
+        params["cursor"] = cursor
 
-    response = requests.get(url, cookies=cookies, headers=headers, params=params)
+    logger.info(f"🔎 Nitter tweet search - fetching page with params={params}")
+
     try:
-        data = response.json()
-    except:
-        raise HTTPException(status_code=500, detail="Could not extract posts from Twitter API response")
-    # print(f"THIS IS THE DATA: {data}")
+        response = curl_cffi.get(
+            "https://nitter.net/search",
+            params=params,
+            impersonate="chrome",
+        )
+    except Exception as e:
+        logger.error(f"❌ Error calling Nitter for tweets: {e}")
+        raise HTTPException(status_code=502, detail="Error contacting Nitter for tweet search")
 
-    # if result_type == "Latest":
-    #     try:
-    #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
-    #     except:
-    #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
-    # elif result_type == "Top":
-    #     try:
-    #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
-    #     except:
-    #         posts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
-    posts = next(
-                (entry["entries"] for entry in data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"] 
-                if entry["type"] == "TimelineAddEntries"), 
-                []
-            )
+    html = response.text
 
-    # Extract cursor for next page (Bottom cursor)
-    next_cursor = None
-    for entry in posts:
-        if entry.get("content", {}).get("entryType") == "TimelineTimelineCursor":
-            cursor_type = entry["content"].get("cursorType")
-            if cursor_type == "Bottom":
-                next_cursor = entry["content"]["value"]
-                break
-    if next_cursor:
-        print(f"Next cursor to return: {next_cursor}")
+    # Optional: keep last page HTML for debugging if needed
+    with open("nitter.html", "w", encoding="utf-8") as f:
+        f.write(html)
 
-    # Filter out cursor entries from posts processing
-    actual_posts = [entry for entry in posts if entry.get("content", {}).get("entryType") != "TimelineTimelineCursor"]
+    soup = BeautifulSoup(html, "html.parser")
 
-    posts_list = []
+    tweets: List[Dict[str, Any]] = []
+    page_tweet_count = 0
 
-    for entries in actual_posts:
-        if "tweet-" not in entries["entryId"]:
-            continue
-        
-        # Check if this entry actually has tweet data
-        try:
-            content = entries.get("content", {})
-            item_content = content.get("itemContent", {})
-            if "tweet_results" not in item_content:
-                continue
-        except:
-            continue
-            
-        # post_url = entries["entryId"]
-        try:
-            entriess = entries["content"]["items"]
-            # print(len(entriess))
-        except:
-            entriess = []
-            # print(f"len of entriesss {len(entriess)}")
-            # print(len(entriess)==0)
-        if len(entriess) == 0:
-            # Try multiple possible structures for username
-            username = None
-            try:
-                # New structure: core -> user_results -> result -> legacy -> screen_name
-                username = entries["content"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
-            except:
+    for item in soup.select("div.timeline-item[data-username]"):
+        username_slug = item.get("data-username")
+
+        # Tweet link and IDs
+        tweet_link_tag = item.select_one("a.tweet-link")
+        tweet_path = tweet_link_tag.get("href") if tweet_link_tag else None  # e.g. "/user/status/123#m"
+        tweet_url = None
+        tweet_id = None
+        if tweet_path:
+            # Strip off any "#m" fragment
+            path_no_fragment = tweet_path.split("#", 1)[0]
+            tweet_url = f"https://x.com{path_no_fragment}"
+            # Extract tweet ID from "/{user}/status/{id}"
+            parts = path_no_fragment.split("/")
+            if "status" in parts:
                 try:
-                    # Old structure: direct legacy -> screen_name
-                    username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["screen_name"]
-                except:
-                    try:
-                        # Alternative structure: legacy -> user -> screen_name
-                        username = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user"]["screen_name"]
-                    except:
-                        # If all fail, try to extract from user_id_str or other fields
-                        try:
-                            user_id = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["user_id_str"]
-                            username = f"user_{user_id}"
-                        except:
-                            username = "unknown_user"
-            post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
-            try:
-                views = entries["content"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
-            except:
-                views = None
-            try:
-                bookmarks = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
-            except:
-                bookmarks = None
-            try:
-                tweet_date = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
-            except:
-                tweet_date = None
-            if tweet_date is None:
+                    tweet_id = parts[parts.index("status") + 1]
+                except (ValueError, IndexError):
+                    tweet_id = None
+
+        header = item.select_one("div.tweet-header")
+        if not header:
                 continue
-            try:
-                media_type = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
-            except:
-                media_type = None
-            try:
-                likes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
-            except:
-                likes =None
-            try:
-                tweet_text = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
-                if "RT @" in tweet_text:
-                    isretweet = True
-                else:
-                    isretweet = False
-            except:
-                tweet_text = None
-            try:
-                quotes = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
-            except:
-                quotes = None
-            try:
-                replies = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
-            except:
-                replies = None
-            try:
-                retweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
-            except:
-                retweet =  None
-            try:
-                quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
-            except:
-                quoted_tweet = None
-            try:
-                url = post_url
-            except:
-                url = None
 
-            data = {
-                "views": views,
-                "bookmarks": bookmarks,
-                "tweet_date": tweet_date,
-                "media_type": media_type,
-                "likes": likes,
-                "tweet_text": tweet_text,
-                "quotes": quotes,
-                "replies": replies,
-                "retweetc": retweet,
-                "thread_tweet": False,
-                "quoted_tweet": quoted_tweet,
-                "isRetweet": isretweet,
-                "url": url
-            }
-            posts_list.append(data)
-            print(data)
-
+        # Handle / X screen name
+        profile_link_tag = header.select_one("a.username")
+        handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@user"
+        if handle_text and handle_text.startswith("@"):
+            screen_name = handle_text[1:]
         else:
-            for entry in entriess:
-                username = entry["item"]["itemContent"]["tweet_results"]["result"]["core"]["user_results"]["result"]["legacy"]["screen_name"]
-                post_url = f'https://x.com/{username}/status/{(entries["entryId"].split("-"))[1]}'
+            screen_name = username_slug
+
+        # X profile URL
+        profile_url = f"https://x.com/{screen_name}" if screen_name else None
+
+        # Display name (prefer title attribute to avoid inline icons)
+        fullname_tag = header.select_one("a.fullname")
+        if fullname_tag and fullname_tag.get("title"):
+            display_name = fullname_tag.get("title")
+        else:
+            display_name = fullname_tag.get_text(strip=True) if fullname_tag else None
+
+        # Verified badge
+        verified = bool(header.select_one(".verified-icon"))
+
+        # Timestamp
+        date_link = header.select_one("span.tweet-date a")
+        created_at = date_link.get("title") if date_link and date_link.get("title") else None
+        time_ago = date_link.get_text(strip=True) if date_link else None
+
+        # Retweet info
+        retweet_header = item.select_one("div.retweet-header")
+        retweeted_by = None
+        if retweet_header:
+            # Example text: "Some User retweeted"
+            retweet_text = retweet_header.get_text(" ", strip=True)
+            if "retweeted" in retweet_text:
+                retweeted_by = retweet_text.replace("retweeted", "").strip()
+
+        # Replying-to info
+        replying_to_tag = item.select_one("div.replying-to")
+        replying_to = None
+        if replying_to_tag:
+            handles = [a.get_text(strip=True) for a in replying_to_tag.select("a")]
+            replying_to = handles or replying_to_tag.get_text(" ", strip=True)
+
+        # Main tweet text
+        content_tag = item.select_one("div.tweet-content.media-body")
+        text = content_tag.get_text(" ", strip=True) if content_tag else None
+
+        # Quoted tweet (if any)
+        quote_block = item.select_one("div.quote")
+        quoted_tweet_url = None
+        quoted_username = None
+        quoted_display_name = None
+        quoted_text = None
+        if quote_block:
+            quote_link = quote_block.select_one("a.quote-link")
+            quote_path = quote_link.get("href") if quote_link else None
+            if quote_path:
+                quoted_tweet_url = f"https://x.com{quote_path.split('#', 1)[0]}"
+
+            quote_header = quote_block.select_one("div.tweet-name-row")
+            if quote_header:
+                q_fullname = quote_header.select_one("a.fullname")
+                q_username = quote_header.select_one("a.username")
+                quoted_display_name = q_fullname.get("title") if q_fullname and q_fullname.get("title") else (
+                    q_fullname.get_text(strip=True) if q_fullname else None
+                )
+                if q_username:
+                    q_handle = q_username.get_text(strip=True)
+                    quoted_username = q_handle[1:] if q_handle.startswith("@") else q_handle
+
+            quote_text_tag = quote_block.select_one("div.quote-text")
+            quoted_text = quote_text_tag.get_text(" ", strip=True) if quote_text_tag else None
+
+        # Stats: replies, retweets, likes, views
+        stats_block = item.select_one("div.tweet-stats")
+        reply_count = retweet_count = like_count = view_count = None
+        if stats_block:
+            stat_spans = stats_block.select("span.tweet-stat")
+
+            def parse_count(span):
+                if not span:
+                    return None
+                txt = span.get_text(" ", strip=True).replace(",", "")
+                parts = [p for p in txt.split(" ") if p.replace(",", "").isdigit()]
+                if not parts:
+                    return None
                 try:
-                    views = entry["item"]["itemContent"]["tweet_results"]["result"]["views"]["count"]
-                except:
-                    views = None
+                    return int(parts[-1])
+                except ValueError:
+                    return None
+
+            if len(stat_spans) > 0:
+                reply_count = parse_count(stat_spans[0])
+            if len(stat_spans) > 1:
+                retweet_count = parse_count(stat_spans[1])
+            if len(stat_spans) > 2:
+                like_count = parse_count(stat_spans[2])
+            if len(stat_spans) > 3:
+                view_count = parse_count(stat_spans[3])
+
+        # Media URLs in X format:
+        #   https://x.com/{screen_name}/status/{tweet_id}/photo/{index}
+        #   https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{index}
+        media_urls = []
+        quoted_media_urls = []
+
+        main_media_index = 1
+        quoted_media_index = 1
+        for img in item.select("div.attachments img"):
+            inside_quote = img.find_parent("div", class_="quote") is not None
+
+            if inside_quote and quoted_tweet_url and quoted_username:
+                quoted_tweet_id = None
                 try:
-                    bookmarks = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["bookmark_count"]
-                except:
-                    bookmarks = None
-                try:
-                    tweet_date = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["created_at"]
-                except:
-                    tweet_date = None
-                if tweet_date is None:
-                    continue
-                try:
-                    media_type = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["entities"]["media"][0]["type"]
-                except:
-                    media_type = None
-                try:
-                    likes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["favorite_count"]
-                except:
-                    likes =None
-                try:
-                    tweet_text = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["full_text"]
-                    if "RT @" in tweet_text:
-                        isretweet = True
-                    else:
-                        isretweet = False
-                except:
-                    tweet_text = None
-                try:
-                    quotes = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["quote_count"]
-                except:
-                    quotes = None
-                try:
-                    replies = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["reply_count"]
-                except:
-                    replies = None
-                try:
-                    retweet = entry["item"]["itemContent"]["tweet_results"]["result"]["legacy"]["retweet_count"]
-                except:
-                    retweet =  None
-                try:
-                    quoted_tweet = entries["content"]["itemContent"]["tweet_results"]["result"]["legacy"]["quoted_status_permalink"]["url"]
-                except:
-                    quoted_tweet = None
-                try:
-                    url = post_url
-                except:
-                    url = None
-                
-                data = {
-                    "views": views,
-                    "bookmarks": bookmarks,
-                    "tweet_date": tweet_date,
-                    "media_type": media_type,
-                    "likes": likes,
-                    "tweet_text": tweet_text,
-                    "quotes": quotes,
-                    "replies": replies,
-                    "retweetc": retweet,
-                    "quoted_tweet": quoted_tweet,
-                    "thread_tweet": True,
-                    "isRetweet": isretweet,
-                    "url": url
-                }
-                posts_list.append(data)
-                print(data)
-    
+                    q_path = quoted_tweet_url.split("https://x.com", 1)[-1]
+                    q_parts = q_path.strip("/").split("/")
+                    if "status" in q_parts:
+                        quoted_tweet_id = q_parts[q_parts.index("status") + 1]
+                except Exception:
+                    quoted_tweet_id = None
+
+                if quoted_tweet_id:
+                    q_url = f"https://x.com/{quoted_username}/status/{quoted_tweet_id}/photo/{quoted_media_index}"
+                    quoted_media_urls.append(q_url)
+                    quoted_media_index += 1
+            else:
+                if tweet_id and screen_name:
+                    m_url = f"https://x.com/{screen_name}/status/{tweet_id}/photo/{main_media_index}"
+                    media_urls.append(m_url)
+                    main_media_index += 1
+
+        tweets.append(
+            {
+                "tweet_id": tweet_id,
+                "tweet_url": tweet_url,
+                "username": username_slug,
+                "screen_name": screen_name,
+                "name": display_name,
+                "verified": verified,
+                "profile_url": profile_url,
+                "text": text,
+                "created_at": created_at,
+                "time_ago": time_ago,
+                "retweeted_by": retweeted_by,
+                "replying_to": replying_to,
+                "reply_count": reply_count,
+                "retweet_count": retweet_count,
+                "like_count": like_count,
+                "view_count": view_count,
+                "media_urls": media_urls,
+                "quoted_media_urls": quoted_media_urls,
+                "quoted_tweet_url": quoted_tweet_url,
+                "quoted_username": quoted_username,
+                "quoted_name": quoted_display_name,
+                "quoted_text": quoted_text,
+            }
+        )
+
+        page_tweet_count += 1
+
+    logger.info(f"📄 Nitter tweet search - parsed {page_tweet_count} tweets on this page")
+
+    # Get next page URL via helper (if any)
+    next_cursor = None
+    next_page_url = get_next_page_url_from_soup(soup)
+    if next_page_url:
+        logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
+        parsed = urlparse(next_page_url)
+        qs = parse_qs(parsed.query)
+        cursor_vals = qs.get("cursor")
+        if cursor_vals:
+            next_cursor = cursor_vals[0]
+            logger.info(f"🔁 Next cursor: {next_cursor}")
+        else:
+            logger.info("⏹ No cursor found in next page URL.")
+    else:
+        logger.info("⏹ No 'Load more' URL found - this is the last page.")
+
+    # Return only this page's tweets and the cursor for the next page
     return {
-        "posts": posts_list,
+        "tweets": tweets,
         "next_cursor": next_cursor,
-        "has_more": next_cursor is not None,
-        "total_results": len(posts_list)
     }
 
 
 @router.get("/search_people")
 async def search_people(
-    query: str = Query(..., description="search query"),
-    cursor: str = Query(None, description="pagination cursor (from previous response)")
+    query: str = Query(..., description="Search people query (via Nitter HTML)"),
+    cursor: str = Query(None, description="Pagination cursor (from previous response)"),
 ):
-    account_res = []
-    cookies = {
-        'guest_id': '173823245631103789',
-        'kdt': '6bjd9isM3Cdo2ayvkdn7SnKjivMvo2g5pvTIJe9W',
-        'auth_token': '9a623f0e722ac5d8362860ab368c5d04c0649464',
-        'ct0': '8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4',
-        'twid': 'u%3D1663936852208898049',
-        'd_prefs': 'MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw',
-        'lang': 'en',
-        'guest_id_marketing': 'v1%3A173823245631103789',
-        'guest_id_ads': 'v1%3A173823245631103789',
-        'personalization_id': '"v1_RsxMNDt0m7rr8fbAaEvvXQ=="',
-    }
-
-    headers = {
-        'accept': '*/*',
-        'accept-language': 'en-US,en;q=0.9',
-        'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
-        'content-type': 'application/json',
-        # 'cookie': 'guest_id=173823245631103789; kdt=6bjd9isM3Cdo2ayvkdn7SnKjivMvo2g5pvTIJe9W; auth_token=9a623f0e722ac5d8362860ab368c5d04c0649464; ct0=8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4; twid=u%3D1663936852208898049; d_prefs=MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw; lang=en; guest_id_marketing=v1%3A173823245631103789; guest_id_ads=v1%3A173823245631103789; personalization_id="v1_RsxMNDt0m7rr8fbAaEvvXQ=="',
-        'priority': 'u=1, i',
-        'referer': 'https://x.com/search?q=(%22AI%20agent%22%20OR%20%22open%20source%22%20OR%20%22LLM%22%20OR%20%22Large%20language%20model%22%20OR%20%22Agentic%22)%20-is%3Aretweet%20lang%3Aen%20since%3A2024-12-30%20until%3A2024-12-31%20min_faves%3A50%20min_retweets%3A10%20-filter%3Areplies&src=typed_query&f=user',
-        'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Brave";v="132"',
-        'sec-ch-ua-mobile': '?0',
-        'sec-ch-ua-platform': '"Linux"',
-        'sec-fetch-dest': 'empty',
-        'sec-fetch-mode': 'cors',
-        'sec-fetch-site': 'same-origin',
-        'sec-gpc': '1',
-        'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
-        'x-client-transaction-id': 'gikStOe1Fv43ifqYbVglRNp5ibfykFnAe4T4n+v6egcfYHiT1yafobsRZAeRuHFIEWR49YFyOtA6jkiRvJcHarnVKB2LgQ',
-        'x-client-uuid': '9f4dfd05-5b66-4fe5-ac75-c6910297f088',
-        'x-csrf-token': '8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4',
-        'x-twitter-active-user': 'yes',
-        'x-twitter-auth-type': 'OAuth2Session',
-        'x-twitter-client-language': 'en',
-    }
-    search_query = query
-
-    # Define the GraphQL variables
-    graphql_variables = {
-        "rawQuery": search_query,
-        "count": 100,
-        "querySource": "typed_query",
-        "product": "People",
-    }
+    """
+    Search for people on X (Twitter) using Nitter HTML, one page at a time.
     
-    # Add cursor if provided
+    - Each request returns only the results on the current page.
+    - If there is another page, a `next_cursor` is returned.
+    - The client can pass that `next_cursor` back in the next request to get the next page.
+    """
+    logger.info(f"🌐 /twitter/search_people (Nitter) - query='{query}', cursor='{cursor}'")
+
+    base_params = {
+        "f": "users",
+        "q": query,
+    }
+
+    # Build params for this page
+    params = dict(base_params)
     if cursor:
-        graphql_variables["cursor"] = cursor
-        print(f"Using provided cursor for people search: {cursor}")
+        params["cursor"] = cursor
 
-    # Define the feature flags
-    features = {
-        "profile_label_improvements_pcf_label_in_post_enabled": True,
-        "rweb_tipjar_consumption_enabled": True,
-        "responsive_web_graphql_exclude_directive_enabled": True,
-        "verified_phone_label_enabled": False,
-        "creator_subscriptions_tweet_preview_api_enabled": True,
-        "responsive_web_graphql_timeline_navigation_enabled": True,
-        "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
-        "premium_content_api_read_enabled": False,
-        "communities_web_enable_tweet_community_results_fetch": True,
-        "c9s_tweet_anatomy_moderator_badge_enabled": True,
-        "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
-        "responsive_web_grok_analyze_post_followups_enabled": True,
-        "responsive_web_jetfuel_frame": False,
-        "responsive_web_grok_share_attachment_enabled": True,
-        "articles_preview_enabled": True,
-        "responsive_web_edit_tweet_api_enabled": True,
-        "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
-        "view_counts_everywhere_api_enabled": True,
-        "longform_notetweets_consumption_enabled": True,
-        "responsive_web_twitter_article_tweet_consumption_enabled": True,
-        "tweet_awards_web_tipping_enabled": False,
-        "responsive_web_grok_analysis_button_from_backend": True,
-        "creator_subscriptions_quote_tweet_preview_enabled": False,
-        "freedom_of_speech_not_reach_fetch_enabled": True,
-        "standardized_nudges_misinfo": True,
-        "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
-        "rweb_video_timestamps_enabled": True,
-        "longform_notetweets_rich_text_read_enabled": True,
-        "longform_notetweets_inline_media_enabled": True,
-        "responsive_web_grok_image_annotation_enabled": False,
-        "responsive_web_enhance_cards_enabled": False,
-    }
+    logger.info(f"🔎 Nitter people search - fetching page with params={params}")
 
-    # Construct the request URL
-    base_url = "https://x.com/i/api/graphql/U3QTLwGF8sZCHDuWIMSAmg/SearchTimeline"
-    params = {
-        "variables": json.dumps(graphql_variables),
-        "features": json.dumps(features),
-    }
-
-    # Make the request
-    response = requests.get(base_url, cookies=cookies, headers=headers, params=params)
     try:
-        data = response.json()
-    except:
-        raise HTTPException(status_code=500, detail="Could not extract accounts from Twitter API response")
-    
-    # Extract accounts from response
-    try:
-        accounts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
-    except:
-        try:
-            accounts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
-        except:
-            raise HTTPException(status_code=500, detail="Could not extract accounts from Twitter API response")
-    
-    # Extract cursor for next page (Bottom cursor)
-    next_cursor = None
-    for entry in accounts:
-        if entry.get("content", {}).get("entryType") == "TimelineTimelineCursor":
-            cursor_type = entry["content"].get("cursorType")
-            if cursor_type == "Bottom":
-                next_cursor = entry["content"]["value"]
-                break
-    if next_cursor:
-        print(f"Next cursor for people search: {next_cursor}")
-    
-    # Filter out cursor entries from accounts processing
-    actual_accounts = [entry for entry in accounts if entry.get("content", {}).get("entryType") != "TimelineTimelineCursor"]
-    
-    for account in actual_accounts:
-        try:
-            username = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["screen_name"]
-            # print(username)
-            account_url = f'https://x.com/{username}/'
-            name = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["name"]
-            description = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["description"]
-            followers = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["followers_count"]
-            following = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["friends_count"]
+        response = curl_cffi.get(
+            "https://nitter.net/search",
+            params=params,
+            impersonate="chrome",
+        )
+    except Exception as e:
+        logger.error(f"❌ Error calling Nitter: {e}")
+        raise HTTPException(status_code=502, detail="Error contacting Nitter for people search")
 
-            data = {
-                "name": name,
+    html = response.text
+    soup = BeautifulSoup(html, "html.parser")
+
+    users: List[Dict[str, Any]] = []
+    page_user_count = 0
+
+    for item in soup.select("div.timeline-item[data-username]"):
+        username_slug = item.get("data-username")
+        header = item.select_one("div.tweet-header")
+        if not header:
+                    continue
+
+        # Handle / X screen name
+        profile_link_tag = header.select_one("a.username")
+        handle_text = profile_link_tag.get_text(strip=True) if profile_link_tag else None  # e.g. "@KwesiFCB"
+        if handle_text and handle_text.startswith("@"):
+            screen_name = handle_text[1:]
+        else:
+            screen_name = username_slug
+
+        # X profile and photo URLs
+        profile_url = f"https://x.com/{screen_name}" if screen_name else None
+        avatar_url = f"https://x.com/{screen_name}/photo" if screen_name else None
+
+        # Name (display name) - use title attribute to avoid verified icon text
+        fullname_tag = header.select_one("a.fullname")
+        if fullname_tag and fullname_tag.get("title"):
+            name = fullname_tag.get("title")
+        else:
+            name = fullname_tag.get_text(strip=True) if fullname_tag else None
+
+        # Verified badge
+        verified = bool(header.select_one(".verified-icon"))
+
+        # Description (bio)
+        bio_tag = item.select_one("div.tweet-content.media-body")
+        description = bio_tag.get_text(" ", strip=True) if bio_tag else None
+
+        users.append(
+            {
+                "username": username_slug,    # slug without @
+                "name": name,                 # display name
+                "verified": verified,
                 "description": description,
-                "followers_count": followers,
-                "following_count": following,
-                "url": account_url
+                "profile_url": profile_url,   # e.g. https://x.com/pyquantnews
+                "avatar_url": avatar_url,     # e.g. https://x.com/pyquantnews/photo
             }
-            account_res.append(data)
-        except:
-            continue
-    
-    # Return results with pagination info
+        )
+
+        page_user_count += 1
+
+    logger.info(f"📄 Nitter people search - parsed {page_user_count} users on this page")
+
+    # Get next page URL via helper (if any)
+    next_cursor = None
+    next_page_url = get_next_page_url_from_soup(soup)
+    if next_page_url:
+        logger.info(f"➡️ Next page URL from HTML: {next_page_url}")
+        parsed = urlparse(next_page_url)
+        qs = parse_qs(parsed.query)
+        cursor_vals = qs.get("cursor")
+        if cursor_vals:
+            next_cursor = cursor_vals[0]
+            logger.info(f"🔁 Next cursor: {next_cursor}")
+        else:
+            logger.info("⏹ No cursor found in next page URL.")
+    else:
+        logger.info("⏹ No 'Load more' URL found - this is the last page.")
+
+    # Return only this page's users and the cursor for the next page
     return {
-        "accounts": account_res,
+        "users": users,
         "next_cursor": next_cursor,
-        "has_more": next_cursor is not None,
-        "total_results": len(account_res)
     }
+
+
+# @router.get("/search_people")
+# async def search_people(
+#     query: str = Query(..., description="search query"),
+#     cursor: str = Query(None, description="pagination cursor (from previous response)")
+# ):
+#     account_res = []
+#     cookies = {
+#         'guest_id': '173823245631103789',
+#         'kdt': '6bjd9isM3Cdo2ayvkdn7SnKjivMvo2g5pvTIJe9W',
+#         'auth_token': '9a623f0e722ac5d8362860ab368c5d04c0649464',
+#         'ct0': '8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4',
+#         'twid': 'u%3D1663936852208898049',
+#         'd_prefs': 'MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw',
+#         'lang': 'en',
+#         'guest_id_marketing': 'v1%3A173823245631103789',
+#         'guest_id_ads': 'v1%3A173823245631103789',
+#         'personalization_id': '"v1_RsxMNDt0m7rr8fbAaEvvXQ=="',
+#     }
+
+#     headers = {
+#         'accept': '*/*',
+#         'accept-language': 'en-US,en;q=0.9',
+#         'authorization': 'Bearer AAAAAAAAAAAAAAAAAAAAANRILgAAAAAAnNwIzUejRCOuH5E6I8xnZz4puTs%3D1Zv7ttfk8LF81IUq16cHjhLTvJu4FA33AGWWjCpTnA',
+#         'content-type': 'application/json',
+#         # 'cookie': 'guest_id=173823245631103789; kdt=6bjd9isM3Cdo2ayvkdn7SnKjivMvo2g5pvTIJe9W; auth_token=9a623f0e722ac5d8362860ab368c5d04c0649464; ct0=8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4; twid=u%3D1663936852208898049; d_prefs=MjoxLGNvbnNlbnRfdmVyc2lvbjoyLHRleHRfdmVyc2lvbjoxMDAw; lang=en; guest_id_marketing=v1%3A173823245631103789; guest_id_ads=v1%3A173823245631103789; personalization_id="v1_RsxMNDt0m7rr8fbAaEvvXQ=="',
+#         'priority': 'u=1, i',
+#         'referer': 'https://x.com/search?q=(%22AI%20agent%22%20OR%20%22open%20source%22%20OR%20%22LLM%22%20OR%20%22Large%20language%20model%22%20OR%20%22Agentic%22)%20-is%3Aretweet%20lang%3Aen%20since%3A2024-12-30%20until%3A2024-12-31%20min_faves%3A50%20min_retweets%3A10%20-filter%3Areplies&src=typed_query&f=user',
+#         'sec-ch-ua': '"Not A(Brand";v="8", "Chromium";v="132", "Brave";v="132"',
+#         'sec-ch-ua-mobile': '?0',
+#         'sec-ch-ua-platform': '"Linux"',
+#         'sec-fetch-dest': 'empty',
+#         'sec-fetch-mode': 'cors',
+#         'sec-fetch-site': 'same-origin',
+#         'sec-gpc': '1',
+#         'user-agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+#         'x-client-transaction-id': 'gikStOe1Fv43ifqYbVglRNp5ibfykFnAe4T4n+v6egcfYHiT1yafobsRZAeRuHFIEWR49YFyOtA6jkiRvJcHarnVKB2LgQ',
+#         'x-client-uuid': '9f4dfd05-5b66-4fe5-ac75-c6910297f088',
+#         'x-csrf-token': '8fb44ade4e79858f801721dd0a850180a87f6df28b5ee3f08d0505afba52eb477558761af3cd218c430a54962fe93c10f59cc50535d0fcc77560d228b98058fc53267029f8dd315f5fd30972505f12e4',
+#         'x-twitter-active-user': 'yes',
+#         'x-twitter-auth-type': 'OAuth2Session',
+#         'x-twitter-client-language': 'en',
+#     }
+#     search_query = query
+
+#     # Define the GraphQL variables
+#     graphql_variables = {
+#         "rawQuery": search_query,
+#         "count": 100,
+#         "querySource": "typed_query",
+#         "product": "People",
+#     }
+    
+#     # Add cursor if provided
+#     if cursor:
+#         graphql_variables["cursor"] = cursor
+#         print(f"Using provided cursor for people search: {cursor}")
+
+#     # Define the feature flags
+#     features = {
+#         "profile_label_improvements_pcf_label_in_post_enabled": True,
+#         "rweb_tipjar_consumption_enabled": True,
+#         "responsive_web_graphql_exclude_directive_enabled": True,
+#         "verified_phone_label_enabled": False,
+#         "creator_subscriptions_tweet_preview_api_enabled": True,
+#         "responsive_web_graphql_timeline_navigation_enabled": True,
+#         "responsive_web_graphql_skip_user_profile_image_extensions_enabled": False,
+#         "premium_content_api_read_enabled": False,
+#         "communities_web_enable_tweet_community_results_fetch": True,
+#         "c9s_tweet_anatomy_moderator_badge_enabled": True,
+#         "responsive_web_grok_analyze_button_fetch_trends_enabled": False,
+#         "responsive_web_grok_analyze_post_followups_enabled": True,
+#         "responsive_web_jetfuel_frame": False,
+#         "responsive_web_grok_share_attachment_enabled": True,
+#         "articles_preview_enabled": True,
+#         "responsive_web_edit_tweet_api_enabled": True,
+#         "graphql_is_translatable_rweb_tweet_is_translatable_enabled": True,
+#         "view_counts_everywhere_api_enabled": True,
+#         "longform_notetweets_consumption_enabled": True,
+#         "responsive_web_twitter_article_tweet_consumption_enabled": True,
+#         "tweet_awards_web_tipping_enabled": False,
+#         "responsive_web_grok_analysis_button_from_backend": True,
+#         "creator_subscriptions_quote_tweet_preview_enabled": False,
+#         "freedom_of_speech_not_reach_fetch_enabled": True,
+#         "standardized_nudges_misinfo": True,
+#         "tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": True,
+#         "rweb_video_timestamps_enabled": True,
+#         "longform_notetweets_rich_text_read_enabled": True,
+#         "longform_notetweets_inline_media_enabled": True,
+#         "responsive_web_grok_image_annotation_enabled": False,
+#         "responsive_web_enhance_cards_enabled": False,
+#     }
+
+#     # Construct the request URL
+#     base_url = "https://x.com/i/api/graphql/U3QTLwGF8sZCHDuWIMSAmg/SearchTimeline"
+#     params = {
+#         "variables": json.dumps(graphql_variables),
+#         "features": json.dumps(features),
+#     }
+
+#     # Make the request
+#     response = requests.get(base_url, cookies=cookies, headers=headers, params=params)
+
+#     print("this is the response", response.text)
+#     try:
+#         data = response.json()
+#     except:
+#         raise HTTPException(status_code=500, detail="Could not extract accounts from Twitter API response")
+    
+#     # Extract accounts from response
+#     try:
+#         accounts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][1]["entries"]
+#     except:
+#         try:
+#             accounts = data["data"]["search_by_raw_query"]["search_timeline"]["timeline"]["instructions"][0]["entries"]
+#         except:
+#             raise HTTPException(status_code=500, detail="Could not extract accounts from Twitter API response")
+    
+#     # Extract cursor for next page (Bottom cursor)
+#     next_cursor = None
+#     for entry in accounts:
+#         if entry.get("content", {}).get("entryType") == "TimelineTimelineCursor":
+#             cursor_type = entry["content"].get("cursorType")
+#             if cursor_type == "Bottom":
+#                 next_cursor = entry["content"]["value"]
+#                 break
+#     if next_cursor:
+#         print(f"Next cursor for people search: {next_cursor}")
+    
+#     # Filter out cursor entries from accounts processing
+#     actual_accounts = [entry for entry in accounts if entry.get("content", {}).get("entryType") != "TimelineTimelineCursor"]
+    
+#     for account in actual_accounts:
+#         try:
+#             username = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["screen_name"]
+#             # print(username)
+#             account_url = f'https://x.com/{username}/'
+#             name = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["name"]
+#             description = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["description"]
+#             followers = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["followers_count"]
+#             following = account["content"]["itemContent"]["user_results"]["result"]["legacy"]["friends_count"]
+
+#             data = {
+#                 "name": name,
+#                 "description": description,
+#                 "followers_count": followers,
+#                 "following_count": following,
+#                 "url": account_url
+#             }
+#             account_res.append(data)
+#         except:
+#             continue
+    
+#     # Return results with pagination info
+#     return {
+#         "accounts": account_res,
+#         "next_cursor": next_cursor,
+#         "has_more": next_cursor is not None,
+#         "total_results": len(account_res)
+#     }
 
 def extract_list_id(list_identifier: str) -> str:
     """
