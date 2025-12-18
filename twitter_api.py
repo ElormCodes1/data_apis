@@ -3810,56 +3810,66 @@ async def extract_list_members_task(task_id: str, list_id: str):
     with ThreadPoolExecutor() as executor:
         await loop.run_in_executor(executor, extract_list_members_sync, task_id, list_id)
 
-@router.get("/status/{task_id}")
-async def get_twitter_task_status(task_id: str):
-    """Get the status of any Twitter background task"""
-    if task_id not in tasks:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Task {task_id} not found"
-        )
-    
-    return tasks[task_id]
-
 @router.get("/results/{task_id}")
 async def get_twitter_task_results(
     task_id: str,
     page: int = Query(1, description="Page number", ge=1),
-    per_page: int = Query(50, description="Items per page", ge=1, le=100)
+    per_page: int = Query(50, description="Items per page", ge=1, le=100),
 ):
-    """Get paginated results of any completed Twitter background task"""
+    """
+    Get the status of a Twitter background task or paginated results if completed.
+
+    - If the task is still running (or failed), this returns a status-style payload
+      with progress and run statistics.
+    - If the task is completed, this returns paginated results.
+    """
     if task_id not in tasks:
         raise HTTPException(
             status_code=404,
-            detail=f"Task {task_id} not found"
+            detail=f"Task {task_id} not found",
         )
-    
+
     task = tasks[task_id]
-    
+
+    # If task is not completed yet, return status-style payload with run stats
     if task.status != "completed":
-        raise HTTPException(
-            status_code=400,
-            detail=f"Task {task_id} is not completed yet. Status: {task.status}"
-        )
-    
-    # Get results from task
-    all_results = getattr(task, 'results', [])
-    
+        return {
+            "task_id": getattr(task, "task_id", task_id),
+            "status": task.status,
+            "progress": getattr(task, "progress", None),
+            "message": getattr(task, "message", None),
+            "list_id": getattr(task, "list_id", None),
+            "total_members": getattr(task, "total_members", None),
+            "pages_processed": getattr(task, "pages_processed", None),
+            "current_page": getattr(task, "current_page", None),
+            "last_updated": getattr(task, "last_updated", None),
+        }
+
+    # Task is completed - return paginated data
+    all_results = getattr(task, "results", []) or []
+
     # Calculate pagination
     total_items = len(all_results)
-    total_pages = (total_items + per_page - 1) // per_page
+    total_pages = (total_items + per_page - 1) // per_page if total_items else 1
+
+    if page > total_pages and total_items != 0:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Page {page} is out of range. Total pages: {total_pages}.",
+        )
+
     start_idx = (page - 1) * per_page
     end_idx = start_idx + per_page
-    
+
     # Get page items
     page_results = all_results[start_idx:end_idx]
-    
-    # Determine result type based on task type
-    result_type = "members" if hasattr(task, 'list_id') else "items"
-    result_key = "members" if hasattr(task, 'list_id') else "items"
-    
+
+    # Determine result key based on task type
+    result_key = "members" if hasattr(task, "list_id") else "items"
+
     response = {
         "task_id": task_id,
+        "status": task.status,
         "total_items": total_items,
         "total_pages": total_pages,
         "current_page": page,
@@ -3869,15 +3879,15 @@ async def get_twitter_task_results(
             "has_next": page < total_pages,
             "has_prev": page > 1,
             "next_page": page + 1 if page < total_pages else None,
-            "prev_page": page - 1 if page > 1 else None
-        }
+            "prev_page": page - 1 if page > 1 else None,
+        },
     }
-    
+
     # Add specific fields based on task type
-    if hasattr(task, 'list_id'):
+    if hasattr(task, "list_id"):
         response["list_id"] = task.list_id
         response["total_members"] = total_items
-    
+
     return response
 
 def extract_user_info(twitter_data):
