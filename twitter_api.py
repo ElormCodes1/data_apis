@@ -2935,7 +2935,14 @@ async def search_tweets(
 
     html = response.text
 
-    # Optional: keep last page HTML for debugging if needed
+    # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
+    logger.info(
+        "🌐 Nitter raw HTML (tweets) length=%s, snippet=%r",
+        len(html),
+        html[:500],
+    )
+
+    # Optional: keep last page HTML for debugging if needed on disk
     with open("nitter.html", "w", encoding="utf-8") as f:
         f.write(html)
 
@@ -3201,6 +3208,13 @@ async def search_people(
         raise HTTPException(status_code=502, detail="Error contacting Nitter for people search")
 
     html = response.text
+
+    # Log a snippet of the raw HTML so we can see what Nitter returns in deployment
+    logger.info(
+        "🌐 Nitter raw HTML (people) length=%s, snippet=%r",
+        len(html),
+        html[:500],
+    )
     soup = BeautifulSoup(html, "html.parser")
 
     users: List[Dict[str, Any]] = []
