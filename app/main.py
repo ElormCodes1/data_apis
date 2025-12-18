@@ -49,13 +49,13 @@ app.add_middleware(
 )
 
 # Include routers
-app.include_router(gmaps_router, prefix="/gmaps", tags=["Google Maps"])
-app.include_router(chrome_webstore_router, prefix="/chrome-webstore", tags=["Chrome Web Store"])
+app.include_router(gmaps_router, prefix="/gmaps", tags=["Google Maps Business Scraper"])
+# app.include_router(chrome_webstore_router, prefix="/chrome-webstore", tags=["Chrome Web Store"])
 app.include_router(twitter_router, prefix="/twitter", tags=["Twitter"])
 app.include_router(producthunt_router, prefix="/producthunt", tags=["ProductHunt"])
 app.include_router(amazon_router, prefix="/amazon-search", tags=["Amazon"])
 app.include_router(youtube_router, prefix="/youtube", tags=["YouTube"])
-app.include_router(facebook_marketplace_router, prefix="/facebook-marketplace", tags=["Facebook Marketplace"])
+app.include_router(facebook_marketplace_router, prefix="/facebook-marketplace", tags=["Facebook Marketplace Search"])
 app.include_router(zillow_router, prefix="/zillow", tags=["Zillow Real Estate"])
 app.include_router(crunchbase_router, prefix="/crunchbase", tags=["Crunchbase"])
 app.include_router(similarweb_router, prefix="/similarweb", tags=["SimilarWeb"])
@@ -70,7 +70,7 @@ async def root():
         "timestamp": datetime.now().isoformat(),
         "available_apis": [
             "/gmaps - Google Maps Business Scraper",
-            "/chrome-webstore - Chrome Web Store Extensions Scraper",
+            # "/chrome-webstore - Chrome Web Store Extensions Scraper",
             "/twitter - Twitter Data Scraper (includes list members)",
             "/producthunt - ProductHunt Rankings Scraper",
             "/amazon-search - Amazon Product Search Scraper",

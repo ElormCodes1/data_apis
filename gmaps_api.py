@@ -898,8 +898,8 @@ def scrape_businesses_task(task_id: str, request: ScrapeRequest):
         
         # Generate download URLs for async task (only if businesses found)
         download_urls = {
-            "json": f"/gmaps/download/{task_id}/json",
-            "csv": f"/gmaps/download/{task_id}/csv"
+            "json": f"/gmaps/download/{task_id}?format=json",
+            "csv": f"/gmaps/download/{task_id}?format=csv"
         }
         
         # Create response
@@ -982,56 +982,92 @@ async def get_api_info():
     """Get Google Maps scraper API information"""
     logger.info("🌐 API ENDPOINT: / (API Info)")
     logger.info("📥 API information request received")
-    
+
+    # Inline health status information (previously returned by /health)
+    health_status = {
+        "status": "healthy",
+        "service": "Google Maps Business Scraper API",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": "Service is running",
+    }
+
     api_info = {
         "service": "Google Maps Business Scraper API",
         "version": "1.0.0",
         "endpoints": {
-            # "/scrape": "Start business scraping (synchronous)",
             "/search": "Start business scraping (asynchronous)",
-            "/status/{task_id}": "Get scraping task status",
-            # "/config": "Get scraper configuration",
-            "/download/{task_id}/json": "Download results as JSON file",
-            "/download/{task_id}/csv": "Download results as CSV file",
-            "/health": "Health check endpoint"
+            "/result/{task_id}": "Get task status or paginated scraping results",
+            "/download/{task_id}": "Download full results as JSON or CSV file",
+            "/health": "Health check endpoint",
         },
-        "example_query": "car companies in Takoradi",
-        "logging": {
-            "enabled": True,
-            "level": "INFO",
-            "console_output": True,
-            "file_output": "gmaps_scraper.log"
-        }
+        "example_query": "car companies in London",
+        # Example of the final result payload (ScrapeResponse) once scraping is complete
+        "result_example_response": {
+            "success": True,
+            "query": "car companies in London",
+            "scraped_time": "2025-01-01 12:00:00",
+            "total_results": 2,
+            "execution_time_seconds": 12.34,
+            "businesses": [
+                {
+                    "business_name": "Prime Motors London",
+                    "average_rating": "4.6",
+                    "review_count": 124,
+                    "business_type": "Car dealer",
+                    "address": "221B Baker Street, London, UK",
+                    "phone": "+44 20 0000 0000",
+                    "website": "https://primemotors.example.com",
+                    "scraped_time": "2025-01-01 12:00:00",
+                    "scraped_index": 1,
+                },
+                {
+                    "business_name": "City Auto London",
+                    "average_rating": "4.2",
+                    "review_count": 87,
+                    "business_type": "Car dealer",
+                    "address": "10 Downing Street, London, UK",
+                    "phone": "+44 20 1111 1111",
+                    "website": "https://cityauto.example.com",
+                    "scraped_time": "2025-01-01 12:00:01",
+                    "scraped_index": 2,
+                },
+            ],
+            "message": "Successfully scraped 2 businesses",
+            "download_urls": {
+                "json": "/gmaps/download/{task_id}?format=json",
+                "csv": "/gmaps/download/{task_id}?format=csv",
+            },
+        },
+        "health": health_status,
     }
     
     logger.info("📤 API information response ready")
     return api_info
-
 
 @router.get("/health", summary="Health Check")
 async def health_check():
     """Health check endpoint for Google Maps API"""
     logger.info("🌐 API ENDPOINT: /health (Health Check)")
     logger.info("📥 Health check request received")
-        
+
     health_status = {
         "status": "healthy",
         "service": "Google Maps Business Scraper API",
         "version": "1.0.0",
         "timestamp": datetime.now().isoformat(),
-        "uptime": "Service is running"
+        "uptime": "Service is running",
     }
-    
+
     logger.info("✅ Health check completed successfully")
-    
+
     return health_status
-        
 
 
 @router.get("/search", summary="Scrape Businesses (Async)")
 async def scrape_businesses_async(
     background_tasks: BackgroundTasks, 
-    query: str = Query(..., description="Search query (e.g., 'hair salons in Takoradi')"),
+    query: str = Query(..., description="Search query (e.g., 'hair salons in London')"),
     max_results: int = Query(default=100, description="Maximum number of results to scrape", ge=1, le=10000)
 ):
     """
@@ -1039,7 +1075,7 @@ async def scrape_businesses_async(
     
     Returns a task ID that can be used to check the status and get results.
     
-     - **query**: Search query (e.g., "hair salons in Takoradi")
+     - **query**: Search query (e.g., "hair salons in London")
      - **max_results**: Maximum number of results (1-10000)
 
     """
@@ -1085,7 +1121,7 @@ async def scrape_businesses_async(
             "status": "pending",
             "message": "Scraping task queued successfully",
             "query": request.query,
-            "status_url": f"/gmaps/status/{task_id}"
+            "status_url": f"/gmaps/result/{task_id}"
         }
         
         logger.info(f"📤 Async response ready: task_id={task_id}")
@@ -1110,11 +1146,15 @@ async def scrape_businesses_async(
             detail=f"Unable to start scraping task for '{query}'. Please try again or contact support if the issue persists."
         )
 
-@router.get("/status/{task_id}", response_model=ScrapeStatus, summary="Get Task Status")
-async def get_task_status(task_id: str):
-    """Get the status of a scraping task"""
-    logger.info(f"🌐 API ENDPOINT: /status/{task_id}")
-    logger.info(f"📥 Status check request for task: {task_id}")
+@router.get("/result/{task_id}", summary="Get Task Result or Status (Paginated)")
+async def get_task_result(
+    task_id: str,
+    page: int = Query(1, ge=1, description="Page number for paginated results"),
+    page_size: int = Query(50, ge=1, le=1000, description="Number of records per page"),
+):
+    """Get the status of a scraping task or paginated results if completed"""
+    logger.info(f"🌐 API ENDPOINT: /result/{task_id}")
+    logger.info(f"📥 Result request for task: {task_id}, page={page}, page_size={page_size}")
     
     try:
         if task_id not in tasks:
@@ -1127,100 +1167,55 @@ async def get_task_status(task_id: str):
         task_status = tasks[task_id]
         logger.info(f"📊 Task {task_id} status: {task_status.status}")
         
-        # Log detailed status for debugging
-        if task_status.current_stage:
-            logger.debug(f"📋 Stage: {task_status.current_stage}")
-        if task_status.current_operation:
-            logger.debug(f"🔧 Operation: {task_status.current_operation}")
-        if task_status.businesses_processed is not None:
-            logger.debug(f"📊 Progress: {task_status.businesses_processed}/{task_status.total_businesses_found or 'unknown'}")
-        if task_status.current_business_name:
-            logger.debug(f"🏢 Current business: {task_status.current_business_name}")
+        # If task is not completed yet, return status-style payload with run stats
+        if task_status.status != "completed" or not task_status.result:
+            logger.info(f"⏳ Task {task_id} not completed yet - returning status")
+            return {
+                "task_id": task_status.task_id,
+                "status": task_status.status,
+                "progress": task_status.progress,
+                "current_stage": task_status.current_stage,
+                "current_operation": task_status.current_operation,
+                "businesses_processed": task_status.businesses_processed,
+                "total_businesses_found": task_status.total_businesses_found,
+                "success_count": task_status.success_count,
+                "failure_count": task_status.failure_count,
+                "started_at": task_status.started_at,
+                "completed_at": task_status.completed_at,
+                "last_updated": task_status.last_updated,
+            }
         
-        return task_status
+        # Task is completed - return paginated data
+        result = task_status.result
+        total_results = result.total_results or len(result.businesses)
+        total_pages = (total_results + page_size - 1) // page_size if total_results else 1
         
-    except HTTPException:
-        # Re-raise HTTP exceptions as is
-        raise
-    except Exception as e:
-        # Log full error details to terminal
-        logger.error("=" * 80)
-        logger.error(f"💥 STATUS ENDPOINT ERROR for task {task_id}")
-        logger.error("=" * 80)
-        logger.error(f"❌ Error Type: {type(e).__name__}")
-        logger.error(f"❌ Error Message: {str(e)}")
-        logger.error("📍 Full Traceback:")
-        logger.error(traceback.format_exc())
-        logger.error("=" * 80)
-        
-        # Return user-friendly error
-        raise HTTPException(
-            status_code=500,
-            detail="Unable to retrieve task status. Please try again or contact support if the issue persists."
-        )
-
-
-
-
-@router.get("/download/{task_id}/json", summary="Download Results as JSON")
-async def download_results_json(task_id: str):
-    """Download scraping results as JSON file"""
-    logger.info(f"🌐 API ENDPOINT: /download/{task_id}/json")
-    logger.info(f"📥 JSON download request for task: {task_id}")
-    
-    try:
-        if task_id not in tasks:
-            logger.warning(f"❌ Task {task_id} not found for JSON download")
-            raise HTTPException(
-                status_code=404,
-                detail=f"Task '{task_id}' not found. Please check your task ID."
-            )
-        
-        task = tasks[task_id]
-        
-        if task.status != "completed" or not task.result:
-            logger.warning(f"❌ Task {task_id} not completed or has no results")
+        if page > total_pages and total_results != 0:
+            logger.warning(f"❌ Page {page} out of range for task {task_id} (total_pages={total_pages})")
             raise HTTPException(
                 status_code=400,
-                detail=f"Task '{task_id}' is not completed yet or has no results. Please check the task status first."
+                detail=f"Page {page} is out of range. Total pages: {total_pages}."
             )
         
-        result = task.result
+        start_idx = (page - 1) * page_size
+        end_idx = start_idx + page_size
+        businesses_slice = result.businesses[start_idx:end_idx]
         
-        # Convert to JSON
-        businesses_data = [business.dict() for business in result.businesses]
+        logger.info(f"📦 Returning page {page}/{total_pages} for task {task_id}")
         
-        download_data = {
+        return {
+            "task_id": task_id,
+            "status": task_status.status,
             "query": result.query,
             "scraped_time": result.scraped_time,
-            "total_results": result.total_results,
+            "total_results": total_results,
             "execution_time_seconds": result.execution_time_seconds,
-            "businesses": businesses_data,
-            "download_info": {
-                "format": "JSON",
-                "download_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                "task_id": task_id
-            }
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "results": [business.dict() for business in businesses_slice],
+            "message": result.message,
         }
-        
-        # Generate filename
-        filename = get_download_filename(result.query, "json", result.scraped_time)
-        
-        # Create JSON content
-        json_content = json.dumps(download_data, indent=2, ensure_ascii=False)
-        
-        logger.info(f"📦 JSON download ready for task {task_id}: {len(result.businesses)} businesses")
-        logger.info(f"📁 Filename: {filename}")
-        
-        # Return file response
-        return Response(
-            content=json_content,
-            media_type='application/json',
-            headers={
-                'Content-Disposition': f'attachment; filename="{filename}"',
-                'Content-Type': 'application/json; charset=utf-8'
-            }
-        )
         
     except HTTPException:
         # Re-raise HTTP exceptions as is
@@ -1228,11 +1223,10 @@ async def download_results_json(task_id: str):
     except Exception as e:
         # Log full error details to terminal
         logger.error("=" * 80)
-        logger.error(f"💥 JSON DOWNLOAD ERROR for task {task_id}")
+        logger.error(f"💥 RESULT ENDPOINT ERROR for task {task_id}")
         logger.error("=" * 80)
         logger.error(f"❌ Error Type: {type(e).__name__}")
         logger.error(f"❌ Error Message: {str(e)}")
-        logger.error(f"📊 Task ID: {task_id}")
         logger.error("📍 Full Traceback:")
         logger.error(traceback.format_exc())
         logger.error("=" * 80)
@@ -1240,18 +1234,22 @@ async def download_results_json(task_id: str):
         # Return user-friendly error
         raise HTTPException(
             status_code=500,
-            detail="Unable to generate JSON download. Please try again or contact support if the issue persists."
+            detail="Unable to retrieve task result. Please try again or contact support if the issue persists."
         )
 
-@router.get("/download/{task_id}/csv", summary="Download Results as CSV")
-async def download_results_csv(task_id: str):
-    """Download scraping results as CSV file"""
-    logger.info(f"🌐 API ENDPOINT: /download/{task_id}/csv")
-    logger.info(f"📥 CSV download request for task: {task_id}")
+
+@router.get("/download/{task_id}", summary="Download Full Results as JSON or CSV File")
+async def download_results(
+    task_id: str,
+    format: str = Query("json", regex="^(json|csv)$", description="Download format: 'json' or 'csv'"),
+):
+    """Download full scraping results as a JSON or CSV file"""
+    logger.info(f"🌐 API ENDPOINT: /download/{task_id}")
+    logger.info(f"📥 Download request for task: {task_id}, format={format}")
     
     try:
         if task_id not in tasks:
-            logger.warning(f"❌ Task {task_id} not found for CSV download")
+            logger.warning(f"❌ Task {task_id} not found for download")
             raise HTTPException(
                 status_code=404,
                 detail=f"Task '{task_id}' not found. Please check your task ID."
@@ -1263,16 +1261,49 @@ async def download_results_csv(task_id: str):
             logger.warning(f"❌ Task {task_id} not completed or has no results")
             raise HTTPException(
                 status_code=400,
-                detail=f"Task '{task_id}' is not completed yet or has no results. Please check the task status first."
+                detail=f"Task '{task_id}' is not completed yet or has no results. Please check the task result first."
             )
         
         result = task.result
         
-        # Convert to CSV
-        csv_content = convert_businesses_to_csv(result.businesses)
-        
         # Generate filename
-        filename = get_download_filename(result.query, "csv", result.scraped_time)
+        filename = get_download_filename(result.query, format, result.scraped_time)
+        
+        if format == "json":
+            # Convert to JSON
+            businesses_data = [business.dict() for business in result.businesses]
+            
+            download_data = {
+                "query": result.query,
+                "scraped_time": result.scraped_time,
+                "total_results": result.total_results,
+                "execution_time_seconds": result.execution_time_seconds,
+                "businesses": businesses_data,
+                "download_info": {
+                    "format": "JSON",
+                    "download_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "task_id": task_id
+                }
+            }
+            
+            # Create JSON content
+            json_content = json.dumps(download_data, indent=2, ensure_ascii=False)
+            
+            logger.info(f"📦 JSON download ready for task {task_id}: {len(result.businesses)} businesses")
+            logger.info(f"📁 Filename: {filename}")
+            
+            # Return file response
+            return Response(
+                content=json_content,
+                media_type='application/json',
+                headers={
+                    'Content-Disposition': f'attachment; filename="{filename}"',
+                    'Content-Type': 'application/json; charset=utf-8'
+                }
+            )
+        
+        # CSV download
+        csv_content = convert_businesses_to_csv(result.businesses)
         
         logger.info(f"📤 CSV download ready: {len(result.businesses)} businesses, filename: {filename}")
         
@@ -1291,12 +1322,11 @@ async def download_results_csv(task_id: str):
     except Exception as e:
         # Log full error details to terminal
         logger.error("=" * 80)
-        logger.error(f"💥 CSV DOWNLOAD ERROR for task {task_id}")
+        logger.error(f"💥 DOWNLOAD ENDPOINT ERROR for task {task_id}")
         logger.error("=" * 80)
         logger.error(f"❌ Error Type: {type(e).__name__}")
         logger.error(f"❌ Error Message: {str(e)}")
         logger.error(f"📊 Task ID: {task_id}")
-        logger.error(f"📊 Result businesses count: {len(result.businesses) if result and result.businesses else 'N/A'}")
         logger.error("📍 Full Traceback:")
         logger.error(traceback.format_exc())
         logger.error("=" * 80)
@@ -1304,7 +1334,7 @@ async def download_results_csv(task_id: str):
         # Return user-friendly error
         raise HTTPException(
             status_code=500,
-            detail="Unable to generate CSV download. Please try again or contact support if the issue persists."
+            detail="Unable to generate download. Please try again or contact support if the issue persists."
         )
 
 @router.delete("/tasks", summary="Clear Completed Tasks")
