@@ -2940,6 +2940,7 @@ async def search_tweets(
         "🌐 Nitter raw HTML (tweets) length=%s, snippet=%r",
         len(html),
         html[:500],
+        "resonse status code", response.status_code
     )
 
     # Optional: keep last page HTML for debugging if needed on disk
@@ -3214,6 +3215,7 @@ async def search_people(
         "🌐 Nitter raw HTML (people) length=%s, snippet=%r",
         len(html),
         html[:500],
+        "resonse status code", response.status_code
     )
     soup = BeautifulSoup(html, "html.parser")
 
