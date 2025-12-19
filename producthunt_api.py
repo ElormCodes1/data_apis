@@ -2604,148 +2604,144 @@ async def get_category_products(
         "status_url": f"/producthunt/status/{task_id}"
     }
 
-@router.get("/status/{task_id}")
-async def get_task_status(task_id: str):
-    """Get the status of a scraping task"""
-    
-    logger.info(f"📊 Status request for task {task_id}")
-    
-    if task_id not in task_status:
-        logger.warning(f"❌ Task {task_id} not found")
-        raise HTTPException(status_code=404, detail="Task not found")
-    
-    task = task_status[task_id]
-    logger.info(f"📈 Task {task_id} status: {task.status}, products: {task.products_found}, pages: {task.current_page}/{task.total_pages}")
-    
-    # Add more detailed status information
-    status_response = {
-        "task_id": task_id,
-        "status": task.status,
-        "progress": task.progress,
-        "total_pages": task.total_pages,
-        "current_page": task.current_page,
-        "products_found": task.products_found,
-        "error_message": task.error_message,
-        "created_at": task.created_at.isoformat() if task.created_at else None,
-        "completed_at": task.completed_at.isoformat() if task.completed_at else None,
-        "result_url": f"/producthunt/results/{task_id}" if task.status == "completed" else None
-    }
-    
-    return status_response
-
 @router.get("/results/{task_id}")
 async def get_task_result(
     task_id: str,
     page: int = Query(default=1, ge=1, description="Page number (starts from 1)"),
     limit: int = Query(default=100, ge=1, le=300, description="Number of products per page (max 100)")
 ):
-    """Get the result of a completed scraping task with pagination"""
+    """Get the status of a scraping task or paginated results if completed"""
     
-    logger.info(f"📥 Results request for task {task_id} - page {page}, limit {limit}")
+    logger.info(f"🌐 API ENDPOINT: /results/{task_id}")
+    logger.info(f"📥 Result request for task: {task_id}, page={page}, limit={limit}")
     
     if task_id not in task_status:
-        logger.warning(f"❌ Task {task_id} not found for results")
+        logger.warning(f"❌ Task {task_id} not found")
         raise HTTPException(status_code=404, detail="Task not found")
     
     task = task_status[task_id]
+    logger.info(f"📊 Task {task_id} status: {task.status}")
     
-    if task.status == "pending":
-        raise HTTPException(status_code=202, detail="Task still pending")
-    elif task.status == "running":
-        raise HTTPException(status_code=202, detail="Task still running")
-    elif task.status == "failed":
-        raise HTTPException(status_code=500, detail=f"Task failed: {task.error_message}")
-    
-    # For completed tasks, return the actual results with pagination
-    if task_id in task_results:
-        result = task_results[task_id]
-        
-        # Handle both products and categories
-        if "products" in result:
-            # Product results
-            all_items = result["products"]
-            total_items = len(all_items)
-            item_type = "products"
-            total_items_key = "total_products"
-            items_per_page_key = "products_per_page"
-        elif "categories" in result:
-            # Category results
-            all_items = result["categories"]
-            total_items = len(all_items)
-            item_type = "categories"
-            total_items_key = "total_categories"
-            items_per_page_key = "categories_per_page"
-        else:
-            logger.error(f"❌ Task {task_id} results contain neither 'products' nor 'categories' key")
-            raise HTTPException(status_code=500, detail="Invalid result format")
-        
-        # Calculate pagination
-        start_index = (page - 1) * limit
-        end_index = start_index + limit
-        current_page_items = all_items[start_index:end_index]
-        
-        # Calculate pagination metadata
-        total_pages = (total_items + limit - 1) // limit  # Ceiling division
-        has_next_page = page < total_pages
-        has_previous_page = page > 1
-        
-        logger.info(f"📊 Task {task_id} results - Page {page}/{total_pages}, {item_type.title()} {start_index+1}-{min(end_index, total_items)} of {total_items}")
-        
-        response_data = {
+    # If task is not completed yet, return status-style payload with run stats
+    if task.status != "completed" or task_id not in task_results:
+        logger.info(f"⏳ Task {task_id} not completed yet - returning status")
+        return {
             "task_id": task_id,
-            "status": "completed",
-            "pagination": {
-                "current_page": page,
-                "total_pages": total_pages,
-                total_items_key: total_items,
-                items_per_page_key: limit,
-                "has_next_page": has_next_page,
-                "has_previous_page": has_previous_page,
-                "start_index": start_index + 1,
-                "end_index": min(end_index, total_items)
-            },
-            "info": {
-                "total_pages": task.total_pages,
-                "has_more_data": result.get("has_next_page", False),
-                "end_cursor": result.get("end_cursor")
-            },
-            item_type: current_page_items,
-            "links": {
-                "first_page": f"/producthunt/results/{task_id}?page=1&limit={limit}",
-                "last_page": f"/producthunt/results/{task_id}?page={total_pages}&limit={limit}",
-                "next_page": f"/producthunt/results/{task_id}?page={page+1}&limit={limit}" if has_next_page else None,
-                "previous_page": f"/producthunt/results/{task_id}?page={page-1}&limit={limit}" if has_previous_page else None
-            }
+            "status": task.status,
+            "progress": task.progress,
+            "total_pages": task.total_pages,
+            "current_page": task.current_page,
+            "products_found": task.products_found,
+            "error_message": task.error_message,
+            "created_at": task.created_at.isoformat() if task.created_at else None,
+            "completed_at": task.completed_at.isoformat() if task.completed_at else None,
         }
-        
-        return response_data
+    
+    # Task is completed and results are available - return paginated data
+    result = task_results[task_id]
+    
+    # Handle both products and categories
+    if "products" in result:
+        # Product results
+        all_items = result["products"]
+        total_items = len(all_items)
+        item_type = "products"
+        total_items_key = "total_products"
+        items_per_page_key = "products_per_page"
+    elif "categories" in result:
+        # Category results
+        all_items = result["categories"]
+        total_items = len(all_items)
+        item_type = "categories"
+        total_items_key = "total_categories"
+        items_per_page_key = "categories_per_page"
     else:
-        logger.warning(f"❌ Task {task_id} results not found")
-        raise HTTPException(status_code=404, detail="Task results not found")
-
-@router.get("/")
-async def root():
-    """ProductHunt API root endpoint"""
-    return {
-        "message": "ProductHunt Scraper API",
-        "version": "1.0.0",
-        "cache_available": CACHE_AVAILABLE and cache is not None,
-        "endpoints": {
-            "GET /products/daily?year=X&month=Y&day=Z": "Start daily rankings scraping",
-            "GET /products/weekly?year=X&week=Y": "Start weekly rankings scraping",
-            "GET /products/monthly?year=X&month=Y": "Start monthly rankings scraping",
-            "GET /products/yearly?year=X": "Start yearly rankings scraping",
-            "GET /todays_launches": "Get today's ProductHunt launches (cached)",
-            "GET /upcoming_launches": "Get ProductHunt upcoming launches (cached)",
-            "GET /categories": "Get ProductHunt categories (cached)",
-            "GET /category_products?category_slug=X": "Get products from specific category (cached)",
-            "GET /status/{task_id}": "Get task status",
-            "GET /results/{task_id}?page=1&limit=100": "Get paginated task results",
-            "GET /health": "Health check endpoint",
-            "GET /cache/stats": "Get cache statistics",
-            "DELETE /cache/clear": "Clear all cache"
+        logger.error(f"❌ Task {task_id} results contain neither 'products' nor 'categories' key")
+        raise HTTPException(status_code=500, detail="Invalid result format")
+    
+    # Calculate pagination
+    start_index = (page - 1) * limit
+    end_index = start_index + limit
+    current_page_items = all_items[start_index:end_index]
+    
+    # Calculate pagination metadata
+    total_pages = (total_items + limit - 1) // limit  # Ceiling division
+    has_next_page = page < total_pages
+    has_previous_page = page > 1
+    
+    logger.info(f"📊 Task {task_id} results - Page {page}/{total_pages}, {item_type.title()} {start_index+1}-{min(end_index, total_items)} of {total_items}")
+    
+    response_data = {
+        "task_id": task_id,
+        "status": "completed",
+        "pagination": {
+            "current_page": page,
+            "total_pages": total_pages,
+            total_items_key: total_items,
+            items_per_page_key: limit,
+            "has_next_page": has_next_page,
+            "has_previous_page": has_previous_page,
+            "start_index": start_index + 1,
+            "end_index": min(end_index, total_items)
+        },
+        "info": {
+            "total_pages": task.total_pages,
+            "has_more_data": result.get("has_next_page", False),
+            "end_cursor": result.get("end_cursor")
+        },
+        item_type: current_page_items,
+        "links": {
+            "first_page": f"/producthunt/results/{task_id}?page=1&limit={limit}",
+            "last_page": f"/producthunt/results/{task_id}?page={total_pages}&limit={limit}",
+            "next_page": f"/producthunt/results/{task_id}?page={page+1}&limit={limit}" if has_next_page else None,
+            "previous_page": f"/producthunt/results/{task_id}?page={page-1}&limit={limit}" if has_previous_page else None
         }
     }
+    
+    logger.info(f"📦 Returning page {page}/{total_pages} for task {task_id}")
+    return response_data
+
+@router.get("/about", summary="API Information")
+async def get_api_info():
+    """Get ProductHunt scraper API information"""
+    logger.info("🌐 API ENDPOINT: /about (API Info)")
+    logger.info("📥 API information request received")
+
+    # Inline health status information
+    cache_status = "available" if CACHE_AVAILABLE and cache and cache.redis_client else "unavailable"
+    
+    health_status = {
+        "status": "healthy",
+        "service": "ProductHunt Scraper API",
+        "version": "1.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "uptime": "Service is running",
+        "cache": cache_status,
+    }
+
+    api_info = {
+        "service": "ProductHunt Scraper API",
+        "version": "1.0.0",
+        "endpoints": {
+            "/about": "ProductHunt API information",
+            "/products/daily?year=X&month=Y&day=Z": "Start daily rankings scraping (asynchronous)",
+            "/products/weekly?year=X&week=Y": "Start weekly rankings scraping (asynchronous)",
+            "/products/monthly?year=X&month=Y": "Start monthly rankings scraping (asynchronous)",
+            "/products/yearly?year=X": "Start yearly rankings scraping (asynchronous)",
+            "/todays_launches": "Get today's ProductHunt launches (cached)",
+            "/upcoming_launches": "Get ProductHunt upcoming launches (cached)",
+            "/categories": "Get ProductHunt categories (cached)",
+            "/category_products?category_slug=X": "Get products from specific category (cached)",
+            "/results/{task_id}": "Get task status or paginated scraping results",
+            "/health": "Health check endpoint",
+            "/cache/clear?endpoint_slug=X": "Clear cache for a specific endpoint (or all cache if no slug provided)",
+        },
+        "cache_available": CACHE_AVAILABLE and cache is not None,
+        "health": health_status,
+    }
+
+    logger.info("📤 API information response ready")
+    return api_info
 
 
 @router.get("/health", summary="Health Check")
@@ -2769,35 +2765,97 @@ async def health_check():
     
     return health_status
 
-@router.get("/cache/stats")
-async def get_cache_stats():
-    """Get cache statistics"""
-    logger.info("🌐 API ENDPOINT: /cache/stats")
-    
-    if not CACHE_AVAILABLE or not cache:
-        raise HTTPException(status_code=503, detail="Cache not available")
-    
-    stats = cache.get_cache_stats()
-    logger.info("✅ Cache stats retrieved successfully")
-    
-    return {
-        "cache_stats": stats,
-        "timestamp": datetime.now().isoformat()
-    }
-
 @router.delete("/cache/clear")
-async def clear_cache():
-    """Clear all cache"""
-    logger.info("🌐 API ENDPOINT: /cache/clear")
+async def clear_cache(
+    endpoint_slug: Optional[str] = Query(None, description="Optional endpoint slug to clear cache for. Options: daily_rankings, weekly_rankings, monthly_rankings, yearly_rankings, todays_launches, upcoming_launches, categories, category_products. If not provided, clears all cache.")
+):
+    """Clear cache for a specific endpoint or all cache if no slug provided"""
+    logger.info(f"🌐 API ENDPOINT: /cache/clear")
     
     if not CACHE_AVAILABLE or not cache:
         raise HTTPException(status_code=503, detail="Cache not available")
     
-    success = cache.clear_all()
-    logger.info(f"✅ Cache clear {'completed' if success else 'failed'}")
+    # If no endpoint_slug provided, clear all cache
+    if endpoint_slug is None:
+        logger.info(f"📥 Cache clear request: ALL cache")
+        success = cache.clear_all()
+        logger.info(f"✅ Cache clear {'completed' if success else 'failed'}")
+        
+        return {
+            "message": "All cache cleared successfully" if success else "Failed to clear all cache",
+            "endpoint_slug": None,
+            "keys_deleted": None,  # clear_all() doesn't return count
+            "success": success,
+            "timestamp": datetime.now().isoformat()
+        }
     
-    return {
-        "message": "Cache cleared successfully" if success else "Failed to clear cache",
-        "success": success,
-        "timestamp": datetime.now().isoformat()
-    }
+    # Clear cache for specific endpoint
+    logger.info(f"📥 Cache clear request for endpoint: {endpoint_slug}")
+    
+    # Valid endpoint slugs
+    valid_endpoints = [
+        "daily_rankings",
+        "weekly_rankings",
+        "monthly_rankings",
+        "yearly_rankings",
+        "todays_launches",
+        "upcoming_launches",
+        "categories",
+        "category_products"
+    ]
+    
+    if endpoint_slug not in valid_endpoints:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid endpoint_slug. Valid options: {', '.join(valid_endpoints)}"
+        )
+    
+    # Clear cache for the specific endpoint using Redis pattern matching
+    if not cache.redis_client:
+        raise HTTPException(status_code=503, detail="Redis client not available")
+    
+    try:
+        # Build pattern based on endpoint slug
+        if endpoint_slug in ["daily_rankings", "weekly_rankings", "monthly_rankings", "yearly_rankings"]:
+            rank_type = endpoint_slug.replace("_rankings", "")
+            pattern = f"producthunt:rankings:{rank_type}:*"
+        elif endpoint_slug == "todays_launches":
+            pattern = "producthunt:todays_launches:*"
+        elif endpoint_slug == "upcoming_launches":
+            pattern = "producthunt:upcoming_launches:*"
+        elif endpoint_slug == "categories":
+            pattern = "producthunt:categories:*"
+        elif endpoint_slug == "category_products":
+            pattern = "producthunt:category_products:*"
+        else:
+            pattern = f"producthunt:{endpoint_slug}:*"
+        
+        # Find all keys matching the pattern
+        keys = cache.redis_client.keys(pattern)
+        
+        if keys:
+            deleted_count = cache.redis_client.delete(*keys)
+            logger.info(f"✅ Cleared {deleted_count} cache entries for endpoint '{endpoint_slug}' (pattern: {pattern})")
+            return {
+                "message": f"Cache cleared successfully for endpoint '{endpoint_slug}'",
+                "endpoint_slug": endpoint_slug,
+                "keys_deleted": deleted_count,
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+        else:
+            logger.info(f"ℹ️ No cache entries found for endpoint '{endpoint_slug}' (pattern: {pattern})")
+            return {
+                "message": f"No cache entries found for endpoint '{endpoint_slug}'",
+                "endpoint_slug": endpoint_slug,
+                "keys_deleted": 0,
+                "success": True,
+                "timestamp": datetime.now().isoformat()
+            }
+            
+    except Exception as e:
+        logger.error(f"❌ Cache clear error for endpoint '{endpoint_slug}': {str(e)}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to clear cache for endpoint '{endpoint_slug}': {str(e)}"
+        )
