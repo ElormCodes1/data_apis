@@ -18,10 +18,11 @@ from twitter_api import router as twitter_router
 from producthunt_api import router as producthunt_router
 from amazon_search_api import router as amazon_router
 from youtube_transcript_api import router as youtube_router
-from facebook_marketplace_router import router as facebook_marketplace_router
-from zillow_router import router as zillow_router
+from facebook_marketplace_api import router as facebook_marketplace_router
+from zillow_api import router as zillow_router
 from crunchbase_api import router as crunchbase_router
 from similarweb_api import router as similarweb_router
+from realtor_api import router as realtor_router
 
 # Configure logging
 logging.basicConfig(
@@ -59,6 +60,7 @@ app.include_router(facebook_marketplace_router, prefix="/facebook-marketplace", 
 app.include_router(zillow_router, prefix="/zillow", tags=["Zillow Real Estate"])
 app.include_router(crunchbase_router, prefix="/crunchbase", tags=["Crunchbase"])
 app.include_router(similarweb_router, prefix="/similarweb", tags=["SimilarWeb"])
+app.include_router(realtor_router, prefix="/realtor", tags=["Realtor.com Real Estate"])
 
 # Health check endpoint
 @app.get("/")
@@ -77,6 +79,7 @@ async def root():
             "/youtube - YouTube Transcript Extractor",
             "/facebook-marketplace - Facebook Marketplace Search",
             "/zillow - Zillow Real Estate Search (Sales & Rentals)",
+            "/realtor - Realtor.com Real Estate Search",
             "/crunchbase - Crunchbase Company Information",
             "/similarweb - SimilarWeb Website Analytics",
             "/docs - API Documentation",
